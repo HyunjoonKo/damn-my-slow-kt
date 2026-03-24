@@ -1,0 +1,37 @@
+# Config (contains credentials)
+config.yaml
+config.yml
+
+# Node.js
+node_modules/
+
+# Build output
+dist/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+*.json.db
+
+# Puppeteer cache
+.cache/
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Screenshots
+kt-error.png
+screenshot.png
+speed-test-result.png
+
+# Update cache
+.update-cache.json

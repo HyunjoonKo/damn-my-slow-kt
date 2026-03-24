@@ -1,0 +1,22 @@
+# damn-slow-my-kt 설정 파일 예시
+# config.yaml로 복사 후 사용: cp config.yaml.example config.yaml
+
+credentials:
+  id: "kt아이디@example.com"
+  password: "비밀번호"
+
+plan:
+  name: "기가라이트"
+  speed_mbps: 1000  # 계약 속도 (Mbps)
+
+schedule:
+  time: "04:00"  # 매일 새벽 4시 측정
+  timezone: "Asia/Seoul"
+
+notification:
+  discord_webhook: ""  # Discord 웹훅 URL (선택)
+  telegram_bot_token: ""  # Telegram 봇 토큰 (선택)
+  telegram_chat_id: ""  # Telegram 채팅 ID (선택)
+
+headless: true  # false이면 브라우저 창 표시 (디버그)
+db_path: "history.db"  # 측정 이력 저장 경로
