@@ -22,8 +22,9 @@ import { Config } from './config';
 import chalk from 'chalk';
 
 const KT_SLA_INTRO_URL = 'https://speed.kt.com/sla/slatest/introduce.asp';
-const SLA_TEST_TIMEOUT_MS = 40 * 60 * 1000; // 40분
-const POLL_INTERVAL_MS = 30 * 1000; // 30초
+// TEST_TIMEOUT_MIN 환경변수로 타임아웃 조절 가능 (기본 40분)
+const SLA_TEST_TIMEOUT_MS = (parseInt(process.env.TEST_TIMEOUT_MIN || '0') || 40) * 60 * 1000;
+const POLL_INTERVAL_MS = 15 * 1000; // 15초 — 라운드 변화를 빠르게 감지
 
 // ─── 진행 UI 헬퍼 ────────────────────────────────────────────────
 
@@ -235,7 +236,14 @@ export class KTProvider {
 
     info('KT 로그인 페이지 감지...');
     await this.fillLoginForm(id, password);
-    await sleep(3000);
+
+    // 로그인 후 리다이렉트 대기 — accounts.kt.com에서 벗어날 때까지
+    try {
+      await page.waitForURL((url) => !url.toString().includes('accounts.kt.com'), { timeout: 15000 });
+    } catch {
+      // 비밀번호 변경 등 중간 페이지에서 멈출 수 있음
+    }
+    await sleep(2000);
 
     const afterUrl = page.url();
     if (afterUrl.includes('unchanged-password') || afterUrl.includes('change-password')) {
@@ -263,44 +271,36 @@ export class KTProvider {
     const page = this.page!;
     const { id, password } = this.config.credentials;
 
-    const clickResult = await page.evaluate(() => {
-      const btn = document.querySelector('a.redbtn.btntolayer') as HTMLElement | null;
-      if (btn) {
-        btn.click();
-        return 'clicked: ' + btn.textContent?.trim();
-      }
-      return 'button not found';
+    // SLA 테스트 버튼 클릭 — 미로그인 시 accounts.kt.com으로 리다이렉트됨
+    const btnExists = await page.evaluate(() => {
+      return !!document.querySelector('a.redbtn.btntolayer');
     });
 
-    // 레이어 버튼 클릭
-
-    if (clickResult.includes('not found')) {
+    if (!btnExists) {
       throw new Error('품질보증(SLA) 테스트 버튼을 찾지 못했습니다');
     }
 
+    await page.click('a.redbtn.btntolayer');
     await sleep(3000);
 
-    const layerInfo = await page.evaluate(() => {
-      const div = document.getElementById('ifArea');
-      const text = (div?.textContent || '').trim();
-      const hasLogin = !!(
-        div?.querySelector('input[type="password"]') ||
-        document.querySelector('input[type="password"]')
-      );
-      return { text: text.slice(0, 200), hasLogin };
-    });
-
-    // 레이어 내용 확인
-
-    if (layerInfo.hasLogin || !layerInfo.text) {
-      info('레이어 내 로그인 필요 → 로그인 진행');
+    // 로그인 페이지로 리다이렉트 되었는지 확인
+    const currentUrl = page.url();
+    if (currentUrl.includes('accounts.kt.com')) {
+      info('로그인 필요 → 로그인 진행');
       await this.fillLoginForm(id, password);
-      await sleep(3000);
+
+      // 로그인 후 리다이렉트 대기
+      try {
+        await page.waitForURL((url) => !url.toString().includes('accounts.kt.com'), { timeout: 15000 });
+      } catch {
+        // 비밀번호 변경 안내 등 중간 페이지에서 멈출 수 있음
+      }
+      await sleep(2000);
 
       // 비밀번호 변경 안내 처리
       const afterUrl = page.url();
-      if (afterUrl.includes('unchanged-password')) {
-        // 비밀번호 변경 안내 - 다음에 하기
+      if (afterUrl.includes('unchanged-password') || afterUrl.includes('change-password')) {
+        info('비밀번호 변경 안내 → 다음에 하기');
         await page.evaluate(() => {
           const btns = document.querySelectorAll('button');
           for (const btn of btns) {
@@ -314,61 +314,81 @@ export class KTProvider {
       }
 
       // 로그인 후 SLA 페이지로 재접속
-      await page.goto(KT_SLA_INTRO_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await sleep(2000);
+      if (!page.url().includes('sla/slatest/introduce.asp')) {
+        await page.goto(KT_SLA_INTRO_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await sleep(2000);
+      }
 
       // 다시 레이어 버튼 클릭
-      await page.evaluate(() => {
-        const btn = document.querySelector('a.redbtn.btntolayer') as HTMLElement | null;
-        btn?.click();
-      });
-      await sleep(2000);
-
-      const retryText = await page.evaluate(() => {
-        return document.getElementById('ifArea')?.textContent?.trim().slice(0, 100) || '';
-      });
-
-      // 재시도 후 확인
-
-      if (!retryText) {
-        throw new Error('로그인 후에도 레이어가 열리지 않았습니다');
-      }
+      await page.click('a.redbtn.btntolayer');
+      await sleep(3000);
     }
+
+    // 레이어가 열렸는지 확인 — Vue 컴포넌트가 #ifArea에 회선 정보를 렌더링
+    const layerText = await page.evaluate(() => {
+      return document.getElementById('ifArea')?.textContent?.trim().slice(0, 200) || '';
+    });
+
+    if (!layerText) {
+      throw new Error('로그인 후에도 SLA 레이어가 열리지 않았습니다');
+    }
+
+    info('SLA 레이어 열림');
   }
 
   private async fillLoginForm(id: string, password: string): Promise<void> {
     const page = this.page!;
-    const idSelector = "input[type='text'], input[type='email'], #userId, input[name='userId']";
-    const passwordSelector = "input[type='password']";
 
-    try {
-      await page.waitForSelector(idSelector, { timeout: 8000 });
-      await page.fill(idSelector, id);
-      info(`계정: ${id}`);
-    } catch {
-      return;
+    // accounts.kt.com 로그인 폼: input#id (아이디), input#password (비밀번호)
+    // 구버전 호환을 위해 generic selector도 fallback으로 유지
+    const idSelectors = ['input#id', "input[name='id']", "input[type='text']"];
+    const pwSelectors = ['input#password', "input[name='password']", "input[type='password']"];
+
+    let idFilled = false;
+    for (const sel of idSelectors) {
+      try {
+        await page.waitForSelector(sel, { timeout: 5000 });
+        await page.fill(sel, id);
+        info(`계정: ${id}`);
+        idFilled = true;
+        break;
+      } catch {
+        continue;
+      }
+    }
+    if (!idFilled) return;
+
+    for (const sel of pwSelectors) {
+      try {
+        await page.waitForSelector(sel, { timeout: 3000 });
+        await page.fill(sel, password);
+        break;
+      } catch {
+        continue;
+      }
     }
 
+    // 로그인 버튼 클릭 — Playwright의 click()으로 안정적인 클릭
     try {
-      await page.waitForSelector(passwordSelector, { timeout: 3000 });
-      await page.fill(passwordSelector, password);
+      const loginBtn = page.locator('button[type="submit"]').filter({ hasText: '로그인' });
+      await loginBtn.waitFor({ state: 'visible', timeout: 3000 });
+      await loginBtn.click();
     } catch {
-      return;
-    }
-
-    try {
-      await page.evaluate(() => {
-        const btns = document.querySelectorAll('button, input[type="submit"]');
-        for (const btn of btns) {
-          const text = (btn as HTMLElement).textContent || (btn as HTMLInputElement).value || '';
-          if (text.includes('로그인')) {
-            (btn as HTMLElement).click();
-            return;
+      // fallback: evaluate로 직접 클릭
+      try {
+        await page.evaluate(() => {
+          const btns = document.querySelectorAll('button, input[type="submit"]');
+          for (const btn of btns) {
+            const text = (btn as HTMLElement).textContent || (btn as HTMLInputElement).value || '';
+            if (text.includes('로그인')) {
+              (btn as HTMLElement).click();
+              return;
+            }
           }
-        }
-      });
-    } catch {
-      // 로그인 버튼 없음
+        });
+      } catch {
+        // 로그인 버튼 없음
+      }
     }
   }
 
@@ -376,63 +396,65 @@ export class KTProvider {
     const page = this.page!;
 
     const result = await page.evaluate(() => {
-      const radioInput = document.querySelector('input[type="radio"]') as HTMLInputElement | null;
+      // Element UI 라디오 — 첫 번째 회선이 기본 선택됨
+      const radioLabel = document.querySelector('label.el-radio.addr') as HTMLElement | null;
+      if (radioLabel) {
+        radioLabel.click(); // Element UI는 label 클릭으로 선택 처리
 
+        // 회선 정보 텍스트 추출 (상품명 - 주소)
+        const labelText = radioLabel.querySelector('.el-radio__label')?.textContent?.trim() || '';
+        return labelText || 'selected (no label)';
+      }
+
+      // fallback: generic radio
+      const radioInput = document.querySelector('input[type="radio"]') as HTMLInputElement | null;
       if (radioInput) {
         radioInput.checked = true;
-        radioInput.dispatchEvent(new Event('input', { bubbles: true }));
         radioInput.dispatchEvent(new Event('change', { bubbles: true }));
-
         const label = radioInput.closest('label');
         if (label) (label as HTMLElement).click();
-
-        return 'selected radio value: ' + radioInput.value;
+        return radioInput.value;
       }
       return 'no radio found';
     });
 
-    // 회선 선택 완료
+    if (result && result !== 'no radio found') {
+      info(`회선: ${result}`);
+    }
+
     await sleep(500);
   }
 
   private async startMeasurement(): Promise<void> {
     const page = this.page!;
 
-    const result = await page.evaluate(() => {
-      const btn = document.getElementById('measureBtn') as HTMLElement | null;
-      if (btn) {
-        btn.click();
-        return 'clicked #measureBtn';
-      }
-
-      const btn2 = document.querySelector('a.speed_speedtest_prestart_btn') as HTMLElement | null;
-      if (btn2) {
-        btn2.click();
-        return 'clicked by class';
-      }
-
-      return 'button not found';
-    });
-
-    // 측정 시작 버튼 클릭 결과 확인
-
-    if (result.includes('not found')) {
+    // #measureBtn (a.speed_speedtest_prestart_btn) 클릭 — Vue 컴포넌트가 SLA 테스트 시작
+    const btn = page.locator('#measureBtn, a.speed_speedtest_prestart_btn').first();
+    try {
+      await btn.waitFor({ state: 'visible', timeout: 5000 });
+      await btn.click();
+    } catch {
       throw new Error('속도 측정 시작 버튼(#measureBtn)을 찾지 못했습니다');
     }
 
-    await sleep(3000);
+    await sleep(5000);
 
+    // 측정이 시작되었는지 확인 — "회차 측정중" 또는 결과 테이블이 나타나야 함
     const layerText = await page.evaluate(() => {
       return (
         document
           .getElementById('ifArea')
           ?.textContent?.replace(/\s+/g, ' ')
           .trim()
-          .slice(0, 200) || ''
+          .slice(0, 300) || ''
       );
     });
 
-    // 측정 시작됨
+    if (layerText.includes('측정중') || layerText.includes('SLA 테스트')) {
+      info('측정 시작 확인');
+    } else {
+      info('측정 시작 대기 중...');
+    }
   }
 
   private async waitForCompletion(): Promise<void> {
@@ -444,37 +466,63 @@ export class KTProvider {
       await sleep(POLL_INTERVAL_MS);
       elapsed += POLL_INTERVAL_MS;
 
-      const layerText = await page.evaluate(() => {
-        return (
-          document.getElementById('ifArea')?.textContent?.replace(/\s+/g, ' ').trim() || ''
-        );
+      // 구조화된 CSS 클래스로 회차별 결과를 직접 파싱
+      const status = await page.evaluate(() => {
+        const ifArea = document.getElementById('ifArea');
+        if (!ifArea) return null;
+
+        // 완료된 회차 수 — 측정값이 채워진 행 카운트
+        let completedRounds = 0;
+        for (let i = 1; i <= 5; i++) {
+          const speedEl = ifArea.querySelector(`.step-table-speed-${i}`);
+          if (speedEl && speedEl.textContent?.trim()) {
+            completedRounds++;
+          }
+        }
+
+        // "측정중" 상태 확인
+        const fullText = ifArea.textContent?.replace(/\s+/g, ' ').trim() || '';
+        const isMeasuring = fullText.includes('측정중');
+
+        // 카운트다운 타이머
+        const countdown = ifArea.querySelector('.delayTimeSec')?.textContent?.trim() || '';
+
+        // 결과 요약 텍스트
+        const totalMatch = fullText.match(/테스트\s*횟수\s*(\d+)\s*번/);
+        const totalCount = totalMatch ? parseInt(totalMatch[1]) : 0;
+
+        return { completedRounds, isMeasuring, countdown, totalCount, textSnippet: fullText.slice(0, 200) };
       });
 
-      if (!layerText) {
-        continue;
-      }
+      if (!status) continue;
 
-      // DEBUG_POLL=1 환경변수로 폴링 중 페이지 텍스트 확인 가능
       if (process.env.DEBUG_POLL) {
-        console.log(`\n[DEBUG POLL ${formatElapsed(elapsed)}] layerText(${layerText.length}자): ${layerText.slice(0, 300)}`);
+        console.log(`\n[DEBUG POLL ${formatElapsed(elapsed)}] rounds=${status.completedRounds} measuring=${status.isMeasuring} countdown=${status.countdown} total=${status.totalCount}`);
+        console.log(`  text: ${status.textSnippet}`);
       }
 
-      const totalMatch = layerText.match(/테스트\s*횟수\s*(\d+)\s*번/);
-      const totalCount = totalMatch ? parseInt(totalMatch[1]) : 0;
+      // 진행률 표시 — CSS 기반 완료 회차 수 우선, fallback으로 텍스트 파싱
+      const roundsDone = status.completedRounds || status.totalCount;
 
-      if (totalCount >= 5 && !layerText.includes('측정중')) {
+      if (roundsDone >= 5 && !status.isMeasuring) {
         measureProgress(5, 5, elapsed);
-        if (process.stdout.isTTY) console.log(''); // 줄바꿈
+        if (process.stdout.isTTY) console.log('');
         info('5회 측정 완료!');
         break;
-      } else if (totalCount > 0) {
-        measureProgress(totalCount, 5, elapsed);
+      } else if (roundsDone > 0) {
+        measureProgress(roundsDone, 5, elapsed);
+        if (status.countdown) {
+          // 카운트다운은 TTY에서만 같은 줄에 표시
+          if (process.stdout.isTTY) {
+            process.stdout.write(chalk.dim(` 다음: ${status.countdown}`));
+          }
+        }
       }
     }
 
     if (elapsed >= maxWaitMs) {
       if (process.stdout.isTTY) console.log('');
-      info(chalk.yellow('⏰ 40분 타임아웃 - 현재 결과로 진행'));
+      info(chalk.yellow(`⏰ ${Math.round(maxWaitMs / 60000)}분 타임아웃 - 현재 결과로 진행`));
     }
   }
 
@@ -490,61 +538,86 @@ export class KTProvider {
     };
 
     try {
-      let layerText = await page.evaluate(() => {
-        return (
-          document.getElementById('ifArea')?.textContent?.replace(/\s+/g, ' ').trim() || ''
-        );
+      // 구조화된 DOM에서 회차별 데이터를 직접 추출
+      const parsed = await page.evaluate(() => {
+        const ifArea = document.getElementById('ifArea');
+        if (!ifArea) return null;
+
+        // 회차별 결과 파싱 — CSS 클래스 기반
+        const rounds: Array<{ speed: string; slaRef: string; result: string; date: string }> = [];
+        for (let i = 1; i <= 5; i++) {
+          const speed = ifArea.querySelector(`.step-table-speed-${i}`)?.textContent?.trim() || '';
+          const slaRef = ifArea.querySelector(`.step-table-default-${i}`)?.textContent?.trim() || '';
+          const resultText = ifArea.querySelector(`.step-table-result-${i}`)?.textContent?.trim() || '';
+          const date = ifArea.querySelector(`.step-table-date-${i}`)?.textContent?.trim() || '';
+          if (speed) {
+            rounds.push({ speed, slaRef, result: resultText, date });
+          }
+        }
+
+        // 요약 텍스트 (display:none이어도 textContent로 접근 가능)
+        const fullText = ifArea.textContent?.replace(/\s+/g, ' ').trim() || '';
+        const satisfyMatch = fullText.match(/SLA만족\s*횟수는?\s*(\d+)\s*번/);
+        const failMatch = fullText.match(/미달\s*횟수는?\s*(\d+)\s*번/);
+        const totalMatch = fullText.match(/테스트\s*횟수\s*(\d+)\s*번/);
+
+        return {
+          rounds,
+          satisfyCount: satisfyMatch ? parseInt(satisfyMatch[1]) : 0,
+          failCount: failMatch ? parseInt(failMatch[1]) : 0,
+          totalCount: totalMatch ? parseInt(totalMatch[1]) : 0,
+          fullText: fullText.slice(0, 500),
+        };
       });
 
-      if (!layerText) {
-        layerText = await page.evaluate(() => {
-          return document.body?.textContent?.replace(/\s+/g, ' ').trim() || '';
-        });
+      if (!parsed) {
+        result.error = 'ifArea 엘리먼트를 찾지 못했습니다';
+        return result;
       }
 
-      // 디버그: 파싱 대상 텍스트는 verbose 모드에서만 표시
+      // 회차별 속도를 평균으로 계산
+      const speeds = parsed.rounds
+        .map((r) => parseFloat(r.speed))
+        .filter((v) => !isNaN(v));
 
-      if (layerText) {
-        const satisfyMatch = layerText.match(/SLA만족\s*횟수는?\s*(\d+)\s*번/);
-        const failMatch = layerText.match(/미달\s*횟수는?\s*(\d+)\s*번/);
-        const totalMatch = layerText.match(/테스트\s*횟수\s*(\d+)\s*번/);
+      if (speeds.length > 0) {
+        result.download_mbps = speeds.reduce((a, b) => a + b, 0) / speeds.length;
+      }
 
-        if (satisfyMatch && failMatch) {
-          const satisfyCount = parseInt(satisfyMatch[1]);
-          const failCount = parseInt(failMatch[1]);
-          const totalCount = totalMatch
-            ? parseInt(totalMatch[1])
-            : satisfyCount + failCount;
+      // SLA 결과 판정
+      const { satisfyCount, failCount, totalCount } = parsed;
+      if (totalCount > 0) {
+        info(`전체 ${totalCount}회: 만족 ${satisfyCount}회, 미달 ${failCount}회`);
 
-          info(`전체 ${totalCount}회: 만족 ${satisfyCount}회, 미달 ${failCount}회`);
+        result.raw_data = {
+          total: totalCount,
+          satisfy: satisfyCount,
+          fail: failCount,
+          rounds: parsed.rounds,
+        };
 
-          result.raw_data = {
-            total: totalCount,
-            satisfy: satisfyCount,
-            fail: failCount,
-            layer_text: layerText.slice(0, 500),
-          };
-
-          if (failCount >= 3) {
-            result.sla_result = 'fail';
-          } else {
-            result.sla_result = 'pass';
-          }
+        // 5회 중 3회 이상 미달이면 SLA fail
+        if (failCount >= 3) {
+          result.sla_result = 'fail';
+        } else {
+          result.sla_result = 'pass';
         }
+      }
 
-        // 속도 파싱
-        const speedMatches = layerText.match(/(\d+(?:\.\d+)?)\s*(?:Mbps|mbps|Mb\/s|M)/g);
-        if (speedMatches && speedMatches.length > 0) {
-          result.download_mbps = parseFloat(speedMatches[0]);
-        }
+      // 개별 라운드 결과 출력
+      for (const round of parsed.rounds) {
+        const speedNum = parseFloat(round.speed);
+        const isFail = round.result.includes('미달');
+        const icon = isFail ? '❌' : '✅';
+        info(`  ${icon} ${round.speed} (기준: ${round.slaRef}) → ${round.result}`);
+      }
 
-        // 결과 텍스트 기반 판단
-        if (result.sla_result === 'unknown') {
-          if (layerText.includes('미달') && /[345]번/.test(layerText)) {
-            result.sla_result = 'fail';
-          } else if (layerText.includes('만족')) {
-            result.sla_result = 'pass';
-          }
+      // fallback: 텍스트 기반 판정
+      if (result.sla_result === 'unknown') {
+        if (parsed.fullText.includes('미달') && /[345]번/.test(parsed.fullText)) {
+          result.sla_result = 'fail';
+        } else if (parsed.fullText.includes('만족')) {
+          result.sla_result = 'pass';
         }
       }
     } catch (e: unknown) {
