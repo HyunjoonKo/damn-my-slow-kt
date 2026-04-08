@@ -454,6 +454,11 @@ export class KTProvider {
         continue;
       }
 
+      // DEBUG_POLL=1 환경변수로 폴링 중 페이지 텍스트 확인 가능
+      if (process.env.DEBUG_POLL) {
+        console.log(`\n[DEBUG POLL ${formatElapsed(elapsed)}] layerText(${layerText.length}자): ${layerText.slice(0, 300)}`);
+      }
+
       const totalMatch = layerText.match(/테스트\s*횟수\s*(\d+)\s*번/);
       const totalCount = totalMatch ? parseInt(totalMatch[1]) : 0;
 
