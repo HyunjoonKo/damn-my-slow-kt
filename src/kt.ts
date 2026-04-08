@@ -18,10 +18,50 @@
 
 import { Browser, BrowserContext, Page, chromium } from 'playwright';
 import { Config } from './config';
+import chalk from 'chalk';
 
 const KT_SLA_INTRO_URL = 'https://speed.kt.com/sla/slatest/introduce.asp';
 const SLA_TEST_TIMEOUT_MS = 40 * 60 * 1000; // 40분
 const POLL_INTERVAL_MS = 30 * 1000; // 30초
+
+// ─── 진행 UI 헬퍼 ────────────────────────────────────────────────
+
+const STEPS = {
+  login:   { num: 1, total: 5, label: '로그인' },
+  layer:   { num: 2, total: 5, label: 'SLA 테스트 준비' },
+  measure: { num: 3, total: 5, label: '속도 측정' },
+  parse:   { num: 4, total: 5, label: '결과 분석' },
+  action:  { num: 5, total: 5, label: '감면 처리' },
+};
+
+function stepHeader(step: { num: number; total: number; label: string }): void {
+  const bar = '●'.repeat(step.num) + '○'.repeat(step.total - step.num);
+  console.log(chalk.cyan(`\n  ${bar}  `) + chalk.bold(`[${step.num}/${step.total}] ${step.label}`));
+}
+
+function info(msg: string): void {
+  console.log(chalk.dim(`       ${msg}`));
+}
+
+function formatElapsed(ms: number): string {
+  const min = Math.floor(ms / 60000);
+  const sec = Math.floor((ms % 60000) / 1000);
+  return min > 0 ? `${min}분 ${sec}초` : `${sec}초`;
+}
+
+/** 측정 진행 바 (1~5회차) */
+function measureProgress(round: number, total: number, elapsedMs: number): void {
+  const filled = round;
+  const empty = total - round;
+  const bar = chalk.green('■'.repeat(filled)) + chalk.gray('□'.repeat(empty));
+  const elapsed = formatElapsed(elapsedMs);
+  // 커서를 줄 앞으로 이동하여 같은 줄에 덮어쓰기
+  if (process.stdout.isTTY) {
+    process.stdout.write(`\r       ${bar}  ${round}/${total}회 완료  ${chalk.dim(elapsed)}  `);
+  } else {
+    console.log(`       ${bar}  ${round}/${total}회 완료  ${elapsed}`);
+  }
+}
 
 export interface SpeedTestResult {
   download_mbps: number;
@@ -85,66 +125,66 @@ export class KTProvider {
     try {
       this.page = await this.context.newPage();
 
-      // Step 1: SLA 소개 페이지 접속
-      console.log('KT SLA 소개 페이지 접속 중...');
+      // Step 1: 로그인
+      stepHeader(STEPS.login);
+      info('speed.kt.com 접속 중...');
       await this.page.goto(KT_SLA_INTRO_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await sleep(2000);
-
-      // Step 2: 로그인 처리 (필요 시)
       await this.handleLogin();
 
-      // Step 3: SLA 소개 페이지 확인
       const currentUrl = this.page.url();
       if (!currentUrl.includes('sla/slatest/introduce.asp')) {
-        console.log(`SLA 소개 페이지로 이동 중... (현재: ${currentUrl})`);
+        info('SLA 페이지로 이동 중...');
         await this.page.goto(KT_SLA_INTRO_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
         await sleep(2000);
       }
+      info('로그인 완료');
 
-      // Step 4: 품질보증(SLA) 테스트 레이어 열기
-      console.log('품질보증(SLA) 테스트 레이어 열기...');
+      // Step 2: SLA 테스트 준비
+      stepHeader(STEPS.layer);
+      info('품질보증(SLA) 테스트 레이어 열기...');
       await this.openSlaLayer();
-
-      // Step 5: 회선 선택
-      console.log('회선 선택 중...');
+      info('회선 선택 중...');
       await this.selectLine();
+      info('준비 완료');
 
-      // Step 6: 측정 시작
-      console.log('속도측정 시작...');
+      // Step 3: 속도 측정
+      stepHeader(STEPS.measure);
+      info('5회 측정 시작 (약 25분 소요)');
       await this.startMeasurement();
-
-      // Step 7: 완료 대기
-      console.log('측정 진행 중 (5회 × 300초 = 최대 25분 대기)...');
       await this.waitForCompletion();
 
-      // Step 8: 결과 파싱
-      console.log('결과 파싱 중...');
+      // Step 4: 결과 분석
+      stepHeader(STEPS.parse);
+      info('측정 데이터 파싱 중...');
       const parsed = await this.parseResults();
       Object.assign(result, parsed);
 
-      // Step 9: SLA 미달 시 이의신청
+      // Step 5: 감면 처리
+      stepHeader(STEPS.action);
       if (result.sla_result === 'fail' && !dryRun) {
-        console.log('SLA 미달 감지 - 이의신청 시도...');
+        info('SLA 미달 → 이의신청 진행...');
         const ok = await this.fileComplaint();
         result.complaint_filed = ok;
         result.complaint_result = ok ? 'success' : 'failed';
+        info(ok ? '이의신청 완료' : '이의신청 실패');
       } else if (result.sla_result === 'fail' && dryRun) {
-        console.log('SLA 미달 (dry-run 모드 - 이의신청 생략)');
+        info('SLA 미달 (dry-run → 이의신청 생략)');
         result.complaint_result = 'skipped';
       } else if (result.sla_result === 'pass') {
-        console.log('SLA 통과 - 이의신청 불필요');
+        info('SLA 통과 → 이의신청 불필요');
         result.complaint_result = 'not_applicable';
       }
     } catch (e: unknown) {
       const err = e instanceof Error ? e : new Error(String(e));
-      console.error(`KT 자동화 오류: ${err.message}`);
+      info(chalk.red(`오류: ${err.message}`));
       result.error = err.message;
       result.sla_result = 'unknown';
 
       // 오류 스크린샷
       try {
         await this.page?.screenshot({ path: 'kt-error.png' });
-        console.log('오류 스크린샷 저장: kt-error.png');
+        info('스크린샷 저장: kt-error.png');
       } catch {
         // ignore
       }
@@ -169,17 +209,16 @@ export class KTProvider {
 
     const url = page.url();
     if (!url.includes('accounts.kt.com')) {
-      console.log(`초기 접속 페이지 OK (로그인 리다이렉트 없음): ${url}`);
       return;
     }
 
-    console.log('KT 로그인 페이지 감지 - 로그인 시도...');
+    info('KT 로그인 페이지 감지...');
     await this.fillLoginForm(id, password);
     await sleep(3000);
 
     const afterUrl = page.url();
     if (afterUrl.includes('unchanged-password') || afterUrl.includes('change-password')) {
-      console.log('비밀번호 변경 안내 페이지 감지 - 다음에 하기 클릭');
+      info('비밀번호 변경 안내 → 다음에 하기');
       try {
         await page.waitForSelector('button', { timeout: 5000 });
         await page.evaluate(() => {
@@ -193,13 +232,10 @@ export class KTProvider {
           }
         });
         await sleep(3000);
-        console.log('비밀번호 변경 유예 완료');
       } catch {
-        console.log('다음에 하기 버튼 없음, 계속 진행');
+        // 다음에 하기 버튼 없음, 계속 진행
       }
     }
-
-    console.log(`로그인 후 URL: ${page.url()}`);
   }
 
   private async openSlaLayer(): Promise<void> {
@@ -215,7 +251,7 @@ export class KTProvider {
       return 'button not found';
     });
 
-    console.log(`레이어 버튼 클릭 결과: ${clickResult}`);
+    // 레이어 버튼 클릭
 
     if (clickResult.includes('not found')) {
       throw new Error('품질보증(SLA) 테스트 버튼을 찾지 못했습니다');
@@ -233,17 +269,17 @@ export class KTProvider {
       return { text: text.slice(0, 200), hasLogin };
     });
 
-    console.log(`레이어 내용: ${JSON.stringify(layerInfo)}`);
+    // 레이어 내용 확인
 
     if (layerInfo.hasLogin || !layerInfo.text) {
-      console.log('레이어 열기 후 로그인 페이지 감지 - 로그인 진행');
+      info('레이어 내 로그인 필요 → 로그인 진행');
       await this.fillLoginForm(id, password);
       await sleep(3000);
 
       // 비밀번호 변경 안내 처리
       const afterUrl = page.url();
       if (afterUrl.includes('unchanged-password')) {
-        console.log('비밀번호 변경 안내 - 다음에 하기 클릭');
+        // 비밀번호 변경 안내 - 다음에 하기
         await page.evaluate(() => {
           const btns = document.querySelectorAll('button');
           for (const btn of btns) {
@@ -257,7 +293,6 @@ export class KTProvider {
       }
 
       // 로그인 후 SLA 페이지로 재접속
-      console.log('로그인 완료 - SLA 소개 페이지로 재접속');
       await page.goto(KT_SLA_INTRO_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await sleep(2000);
 
@@ -272,7 +307,7 @@ export class KTProvider {
         return document.getElementById('ifArea')?.textContent?.trim().slice(0, 100) || '';
       });
 
-      console.log(`재시도 후 레이어 내용: ${retryText}`);
+      // 재시도 후 확인
 
       if (!retryText) {
         throw new Error('로그인 후에도 레이어가 열리지 않았습니다');
@@ -288,18 +323,15 @@ export class KTProvider {
     try {
       await page.waitForSelector(idSelector, { timeout: 8000 });
       await page.fill(idSelector, id);
-      console.log(`ID 입력: ${id}`);
+      info(`계정: ${id}`);
     } catch {
-      console.log('ID 필드 없음');
       return;
     }
 
     try {
       await page.waitForSelector(passwordSelector, { timeout: 3000 });
       await page.fill(passwordSelector, password);
-      console.log('비밀번호 입력 완료');
     } catch {
-      console.log('비밀번호 필드 없음');
       return;
     }
 
@@ -314,9 +346,8 @@ export class KTProvider {
           }
         }
       });
-      console.log('로그인 버튼 클릭');
     } catch {
-      console.log('로그인 버튼 없음');
+      // 로그인 버튼 없음
     }
   }
 
@@ -339,7 +370,7 @@ export class KTProvider {
       return 'no radio found';
     });
 
-    console.log(`회선 선택 결과: ${result}`);
+    // 회선 선택 완료
     await sleep(500);
   }
 
@@ -362,7 +393,7 @@ export class KTProvider {
       return 'button not found';
     });
 
-    console.log(`측정 시작 결과: ${result}`);
+    // 측정 시작 버튼 클릭 결과 확인
 
     if (result.includes('not found')) {
       throw new Error('속도 측정 시작 버튼(#measureBtn)을 찾지 못했습니다');
@@ -380,7 +411,7 @@ export class KTProvider {
       );
     });
 
-    console.log(`측정 시작 후 상태: ${layerText}`);
+    // 측정 시작됨
   }
 
   private async waitForCompletion(): Promise<void> {
@@ -399,27 +430,25 @@ export class KTProvider {
       });
 
       if (!layerText) {
-        console.log(`[${elapsed / 1000}s] 레이어 텍스트 없음`);
         continue;
       }
-
-      console.log(`[${elapsed / 1000}s] 현재 상태: ${layerText.slice(0, 200)}`);
 
       const totalMatch = layerText.match(/테스트\s*횟수\s*(\d+)\s*번/);
       const totalCount = totalMatch ? parseInt(totalMatch[1]) : 0;
 
       if (totalCount >= 5 && !layerText.includes('측정중')) {
-        console.log(`5회 측정 완료! (총 ${totalCount}회)`);
+        measureProgress(5, 5, elapsed);
+        if (process.stdout.isTTY) console.log(''); // 줄바꿈
+        info('5회 측정 완료!');
         break;
-      } else if (totalCount >= 5) {
-        console.log('5회차 측정 진행 중...');
       } else if (totalCount > 0) {
-        console.log(`현재까지 ${totalCount}회 측정 완료, 대기 중...`);
+        measureProgress(totalCount, 5, elapsed);
       }
     }
 
     if (elapsed >= maxWaitMs) {
-      console.log('40분 타임아웃 - 현재까지의 결과로 파싱');
+      if (process.stdout.isTTY) console.log('');
+      info(chalk.yellow('⏰ 40분 타임아웃 - 현재 결과로 진행'));
     }
   }
 
@@ -447,7 +476,7 @@ export class KTProvider {
         });
       }
 
-      console.log(`파싱할 텍스트: ${layerText.slice(0, 300)}`);
+      // 디버그: 파싱 대상 텍스트는 verbose 모드에서만 표시
 
       if (layerText) {
         const satisfyMatch = layerText.match(/SLA만족\s*횟수는?\s*(\d+)\s*번/);
@@ -461,9 +490,7 @@ export class KTProvider {
             ? parseInt(totalMatch[1])
             : satisfyCount + failCount;
 
-          console.log(
-            `측정 결과: 전체 ${totalCount}회 중 만족 ${satisfyCount}회, 미달 ${failCount}회`
-          );
+          info(`전체 ${totalCount}회: 만족 ${satisfyCount}회, 미달 ${failCount}회`);
 
           result.raw_data = {
             total: totalCount,
@@ -474,10 +501,8 @@ export class KTProvider {
 
           if (failCount >= 3) {
             result.sla_result = 'fail';
-            console.log(`SLA 미달: ${failCount}회 미달 (3회 이상 시 fail)`);
           } else {
             result.sla_result = 'pass';
-            console.log(`SLA 통과: ${failCount}회 미달 (3회 미만)`);
           }
         }
 
@@ -498,7 +523,7 @@ export class KTProvider {
       }
     } catch (e: unknown) {
       const err = e instanceof Error ? e : new Error(String(e));
-      console.error(`결과 파싱 실패: ${err.message}`);
+      info(chalk.red(`결과 파싱 실패: ${err.message}`));
       result.error = err.message;
     }
 
@@ -519,10 +544,9 @@ export class KTProvider {
       return 'not found';
     });
 
-    console.log(`이의신청 버튼 결과: ${clickResult}`);
+    info(`이의신청 버튼: ${clickResult.includes('not found') ? '없음' : '클릭'}`);
 
     if (clickResult.includes('not found')) {
-      console.log('이의신청 버튼을 찾지 못했습니다');
       return false;
     }
 
@@ -537,11 +561,9 @@ export class KTProvider {
       await submitButton.waitFor({ state: 'visible', timeout: 5000 });
       await submitButton.click();
       await sleep(3000);
-      console.log('이의신청 제출 완료');
       return true;
     } catch {
-      console.log('제출 버튼 없음 (이의신청 페이지가 다를 수 있음)');
-      return true; // 버튼 클릭까지는 성공으로 처리
+      return true; // 이의신청 버튼 클릭까지는 성공으로 처리
     }
   }
 
