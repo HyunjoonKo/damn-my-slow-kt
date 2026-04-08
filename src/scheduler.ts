@@ -362,9 +362,10 @@ function installSynologyCron(config: Config): void {
   try {
     fs.writeFileSync(SYSTEM_CRONTAB, newCrontab, 'utf8');
   } catch {
+    // sudo 실행 시 $HOME이 /root로 바뀌므로 --config로 원래 경로를 명시해야 한다
     throw new Error(
       `/etc/crontab 쓰기 실패. sudo 권한으로 다시 시도하세요:\n` +
-      `  sudo npx --yes damn-my-slow-kt schedule install`
+      `  sudo npx --yes damn-my-slow-kt schedule install --config ${configPath}`
     );
   }
 

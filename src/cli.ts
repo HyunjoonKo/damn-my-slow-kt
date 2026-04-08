@@ -182,10 +182,10 @@ export function buildCli(): Command {
             console.log(chalk.dim(`   원인: ${err.message}`));
             console.log('');
             console.log('   수동으로 실행하려면:');
-            console.log(chalk.bold('     npx --yes damn-my-slow-kt run'));
+            console.log(chalk.bold(`     npx --yes damn-my-slow-kt run --config ${configPath}`));
             console.log('');
             console.log('   스케줄을 다시 등록하려면:');
-            console.log(chalk.bold('     npx --yes damn-my-slow-kt schedule install'));
+            console.log(chalk.bold(`     sudo npx --yes damn-my-slow-kt schedule install --config ${configPath}`));
           }
         }
       } else if (platform === 'windows') {
