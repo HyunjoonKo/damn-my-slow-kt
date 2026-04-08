@@ -7,6 +7,14 @@ import { Config } from './config';
 import { SpeedRecord } from './db';
 
 export function formatRecord(record: SpeedRecord): string {
+  // 자동화 오류로 측정 자체가 실패한 경우 — 속도값이 0이어도 의미 없음
+  if (record.error) {
+    return (
+      `**인터넷 속도 측정 실패** (${record.measured_at.slice(0, 16)})\n` +
+      `🚨 오류: ${record.error}`
+    );
+  }
+
   const slaEmoji =
     record.sla_result === 'pass' ? '✅' : record.sla_result === 'fail' ? '❌' : '⚠️';
   let complaintInfo = '';
@@ -29,7 +37,7 @@ export async function notifyDiscord(webhookUrl: string, record: SpeedRecord): Pr
   if (!webhookUrl) return false;
 
   const message = formatRecord(record);
-  const color = record.sla_result === 'pass' ? 0x00ff00 : 0xff0000;
+  const color = record.error ? 0xff8800 : record.sla_result === 'pass' ? 0x00ff00 : 0xff0000;
 
   const payload = {
     embeds: [
