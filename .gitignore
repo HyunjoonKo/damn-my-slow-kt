@@ -2,6 +2,12 @@
 config.yaml
 config.yml
 
+# Environment
+.env
+.env.*
+!.env.ai-ready
+!.env.example
+
 # Node.js
 node_modules/
 
@@ -24,7 +30,6 @@ dist/
 .DS_Store
 
 # IDE
-.vscode/
 .idea/
 *.swp
 
@@ -35,3 +40,9 @@ speed-test-result.png
 
 # Update cache
 .update-cache.json
+
+# Sisyphus (AI agent planner)
+.sisyphus/
+!.sisyphus/.gitignore
+!.sisyphus/plans/
+!.sisyphus/evidence/
