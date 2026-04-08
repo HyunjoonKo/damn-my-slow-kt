@@ -93,11 +93,45 @@ export function getRunCommand(): string {
 }
 
 // ─────────────────────────────────────────────
+// 스케줄 시간 계산
+// ─────────────────────────────────────────────
+
+interface ScheduleTime { hour: number; minute: number; }
+
+/**
+ * 시작 시간 + 간격 + 최대 횟수로 트리거 시간 목록 생성.
+ * 예: 04:00, max=10, interval=120 → 04:00, 06:00, 08:00, ..., 22:00
+ */
+function buildScheduleTimes(config: Config): ScheduleTime[] {
+  const [startH, startM] = config.schedule.time.split(':').map(Number);
+  const maxAttempts = config.schedule.max_attempts || 10;
+  const intervalMin = config.schedule.retry_interval_minutes || 120;
+
+  const times: ScheduleTime[] = [];
+  for (let i = 0; i < maxAttempts; i++) {
+    const totalMinutes = (startH * 60 + startM) + (i * intervalMin);
+    const hour = Math.floor(totalMinutes / 60) % 24;
+    const minute = totalMinutes % 60;
+
+    // 다음 날로 넘어가면 중단 (24시간 내만)
+    if (i > 0 && totalMinutes >= 24 * 60) break;
+
+    times.push({ hour, minute });
+  }
+  return times;
+}
+
+/** 스케줄 시간을 보기 좋게 출력 */
+function formatScheduleTimes(times: ScheduleTime[]): string {
+  return times.map((t) => `${String(t.hour).padStart(2, '0')}:${String(t.minute).padStart(2, '0')}`).join(', ');
+}
+
+// ─────────────────────────────────────────────
 // macOS - launchd plist
 // ─────────────────────────────────────────────
 
 function buildLaunchdPlist(config: Config): string {
-  const [hour, minute] = config.schedule.time.split(':');
+  const times = buildScheduleTimes(config);
   const exec = getCliExec();
   const configPath = DEFAULT_CONFIG_PATH;
   const logDir = DATA_DIR;
@@ -106,9 +140,16 @@ function buildLaunchdPlist(config: Config): string {
 
   fs.mkdirSync(logDir, { recursive: true });
 
-  // ProgramArguments: [program, ...prefixArgs, 'run', '--config', configPath]
   const args = [exec.program, ...exec.prefixArgs, 'run', '--config', configPath];
   const argsXml = args.map((a) => `    <string>${a}</string>`).join('\n');
+
+  // launchd는 StartCalendarInterval을 array로 받으면 여러 시간에 트리거
+  const calendarEntries = times.map((t) => `    <dict>
+      <key>Hour</key>
+      <integer>${t.hour}</integer>
+      <key>Minute</key>
+      <integer>${t.minute}</integer>
+    </dict>`).join('\n');
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -122,12 +163,9 @@ function buildLaunchdPlist(config: Config): string {
 ${argsXml}
   </array>
   <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key>
-    <integer>${parseInt(hour)}</integer>
-    <key>Minute</key>
-    <integer>${parseInt(minute)}</integer>
-  </dict>
+  <array>
+${calendarEntries}
+  </array>
   <key>StandardOutPath</key>
   <string>${logPath}</string>
   <key>StandardErrorPath</key>
@@ -159,8 +197,12 @@ export function installMacos(config: Config): void {
   fs.writeFileSync(LAUNCHD_PLIST_PATH, plist, 'utf8');
 
   execSync(`launchctl load "${LAUNCHD_PLIST_PATH}"`);
+
+  const times = buildScheduleTimes(config);
   console.log(`✅ macOS launchd 스케줄 등록 완료: ${LAUNCHD_PLIST_PATH}`);
-  console.log(`   매일 ${config.schedule.time}에 자동 실행됩니다.`);
+  console.log(`   매일 ${times.length}회 실행: ${formatScheduleTimes(times)}`);
+  console.log(`   감면 성공 시 나머지 실행은 자동 스킵됩니다.`);
+  console.log(`\n   제거하려면: npx damn-my-slow-kt schedule remove`);
 }
 
 export function removeMacos(): void {
@@ -201,14 +243,13 @@ export function installLinux(config: Config): void {
 }
 
 function installSystemd(config: Config): void {
-  const [hour, minute] = config.schedule.time.split(':');
+  const times = buildScheduleTimes(config);
   const exec = getCliExec();
   const configPath = DEFAULT_CONFIG_PATH;
 
   const serviceDir = path.dirname(SYSTEMD_SERVICE_PATH);
   fs.mkdirSync(serviceDir, { recursive: true });
 
-  // ExecStart: program prefixArgs... run --config configPath
   const execCmd = [exec.program, ...exec.prefixArgs, 'run', '--config', configPath].join(' ');
 
   const serviceContent = `[Unit]
@@ -221,11 +262,16 @@ StandardOutput=journal
 StandardError=journal
 `;
 
+  // systemd는 여러 OnCalendar 라인을 지원
+  const onCalendarLines = times
+    .map((t) => `OnCalendar=*-*-* ${String(t.hour).padStart(2, '0')}:${String(t.minute).padStart(2, '0')}:00`)
+    .join('\n');
+
   const timerContent = `[Unit]
-Description=damn-my-slow-kt daily timer
+Description=damn-my-slow-kt daily timer (${times.length}회/일)
 
 [Timer]
-OnCalendar=*-*-* ${hour}:${minute}:00
+${onCalendarLines}
 Persistent=true
 
 [Install]
@@ -240,20 +286,24 @@ WantedBy=timers.target
   execSync('systemctl --user start damn-my-slow-kt.timer');
 
   console.log(`✅ systemd 타이머 등록 완료`);
-  console.log(`   매일 ${config.schedule.time}에 자동 실행됩니다.`);
+  console.log(`   매일 ${times.length}회 실행: ${formatScheduleTimes(times)}`);
+  console.log(`   감면 성공 시 나머지 실행은 자동 스킵됩니다.`);
   console.log(`   확인: systemctl --user status damn-my-slow-kt.timer`);
+  console.log(`\n   제거하려면: npx damn-my-slow-kt schedule remove`);
 }
 
 function installCron(config: Config): void {
-  const [hour, minute] = config.schedule.time.split(':');
+  const times = buildScheduleTimes(config);
   const exec = getCliExec();
   const configPath = DEFAULT_CONFIG_PATH;
   const logPath = path.join(DATA_DIR, 'cron.log');
 
   const execCmd = [exec.program, ...exec.prefixArgs, 'run', '--config', configPath].join(' ');
-  const cronLine =
-    `${minute} ${hour} * * * ` +
-    `${execCmd} >> ${logPath} 2>&1 ${CRON_COMMENT}`;
+
+  // 각 트리거 시간마다 cron 라인 생성
+  const cronLines = times.map((t) =>
+    `${t.minute} ${t.hour} * * * ${execCmd} >> ${logPath} 2>&1 ${CRON_COMMENT}`
+  );
 
   let existing = '';
   try {
@@ -262,13 +312,13 @@ function installCron(config: Config): void {
     // no crontab
   }
 
+  // 기존 damn-my-slow-kt 라인 제거 후 새 라인 추가
   const lines = existing
     .split('\n')
     .filter((l) => !l.includes(CRON_COMMENT));
-  lines.push(cronLine);
+  lines.push(...cronLines);
 
   const newCrontab = lines.join('\n') + '\n';
-  const { execFileSync } = require('child_process');
   const proc = require('child_process').spawnSync('crontab', ['-'], {
     input: newCrontab,
     encoding: 'utf8',
@@ -279,7 +329,9 @@ function installCron(config: Config): void {
   }
 
   console.log(`✅ crontab 등록 완료`);
-  console.log(`   매일 ${config.schedule.time}에 자동 실행됩니다.`);
+  console.log(`   매일 ${times.length}회 실행: ${formatScheduleTimes(times)}`);
+  console.log(`   감면 성공 시 나머지 실행은 자동 스킵됩니다.`);
+  console.log(`\n   제거하려면: npx damn-my-slow-kt schedule remove`);
 }
 
 export function removeLinux(): void {
@@ -325,11 +377,13 @@ export function installSchedule(config: Config): void {
     installLinux(config);
   } else if (platform === 'windows') {
     console.log('');
+    const times = buildScheduleTimes(config);
     console.log('Windows에서는 작업 스케줄러(Task Scheduler)를 사용하세요:');
     console.log('1. Win + R → taskschd.msc 입력');
     console.log('2. 기본 작업 만들기 클릭');
     console.log(`3. 프로그램: npx --yes damn-my-slow-kt run --config ${DEFAULT_CONFIG_PATH}`);
-    console.log(`4. 트리거: 매일 ${config.schedule.time}`);
+    console.log(`4. 트리거: 매일 ${formatScheduleTimes(times)} (${times.length}개 등록)`);
+    console.log('   (run 내부에서 오늘 완료 여부를 체크하므로 모두 등록해도 안전합니다)');
   } else {
     throw new Error(`지원하지 않는 플랫폼: ${platform}`);
   }

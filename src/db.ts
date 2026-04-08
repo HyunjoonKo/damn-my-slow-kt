@@ -205,6 +205,19 @@ export class SpeedDatabase {
     }
   }
 
+  /** 오늘(KST 기준) 측정 기록 조회 */
+  getTodayRecords(timezone = 'Asia/Seoul'): SpeedRecord[] {
+    // 오늘 날짜를 해당 타임존으로 계산
+    const now = new Date();
+    const todayStr = now.toLocaleDateString('sv-SE', { timeZone: timezone }); // YYYY-MM-DD
+    return this.getHistory(9999).filter((r) => r.measured_at.startsWith(todayStr));
+  }
+
+  /** 오늘 감면 신청 성공 여부 */
+  hasTodayComplaintSuccess(timezone = 'Asia/Seoul'): boolean {
+    return this.getTodayRecords(timezone).some((r) => r.complaint_result === 'success');
+  }
+
   getStats(month?: string): Stats {
     const records = this.getHistory(9999, month);
 

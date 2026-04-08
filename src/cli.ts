@@ -34,10 +34,6 @@ import { installSchedule, removeSchedule, getPlatform } from './scheduler';
 import { checkForUpdates } from './updater';
 import { checkAndRunMigrations, CURRENT_CONFIG_VERSION } from './migration';
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 // package.json에서 버전 읽기
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const pkg = require('../package.json') as { version: string; name: string };
@@ -231,17 +227,18 @@ export function buildCli(): Command {
     });
 
   // ─────────────────────────────────────
-  // run
+  // run - 1회 측정 후 종료. cron/launchd가 다회 트리거.
+  // 매 실행 시 오늘 이미 감면 성공했는지 DB에서 확인.
   // ─────────────────────────────────────
   program
     .command('run')
-    .description('측정 + 감면 신청 실행 (설정에 따라 다회 반복)')
+    .description('1회 측정 + 감면 신청 (스케줄러가 다회 트리거)')
     .option('-c, --config <path>', '설정 파일 경로', DEFAULT_CONFIG_PATH)
     .option('--dry-run', '측정만 하고 감면 신청 생략', false)
-    .option('--once', '1회만 측정 (retry 무시)', false)
+    .option('--force', '오늘 완료 여부 무시하고 강제 실행', false)
     .option('-v, --verbose', '상세 로그 출력', false)
     .option('--screenshot', '측정 완료 후 스크린샷 저장', false)
-    .action(async (opts: { config: string; dryRun: boolean; once: boolean; verbose: boolean; screenshot: boolean }) => {
+    .action(async (opts: { config: string; dryRun: boolean; force: boolean; verbose: boolean; screenshot: boolean }) => {
       // 업데이트 체크
       const noUpdateCheck = program.opts().noUpdateCheck as boolean | undefined;
       await checkForUpdates(pkg.version, { noUpdateCheck });
@@ -264,91 +261,105 @@ export function buildCli(): Command {
         process.exit(1);
       }
 
-      const maxAttempts = opts.once ? 1 : (cfg.schedule.max_attempts || 1);
-      const intervalMin = cfg.schedule.retry_interval_minutes || 120;
-      const stopOnSuccess = cfg.schedule.stop_on_complaint_success !== false;
+      // ── 오늘 상태 체크 ──
+      const db = new SpeedDatabase(cfg.db_path);
+      const todayRecords = db.getTodayRecords(cfg.schedule.timezone);
+      const todayCount = todayRecords.length;
+      const maxAttempts = cfg.schedule.max_attempts || 10;
+      const alreadySucceeded = db.hasTodayComplaintSuccess(cfg.schedule.timezone);
+      const isInteractive = process.stdout.isTTY === true;
 
+      if (!opts.force) {
+        // 오늘 감면 성공 완료
+        if (alreadySucceeded && cfg.schedule.stop_on_complaint_success !== false) {
+          if (isInteractive) {
+            console.log(chalk.green(`\n✅ 오늘 이미 감면 신청에 성공했습니다. (${todayCount}회 측정)`));
+            const { proceed } = await inquirer.prompt([{
+              type: 'confirm',
+              name: 'proceed',
+              message: '그래도 추가 측정하시겠습니까?',
+              default: false,
+            }]);
+            if (!proceed) {
+              db.close();
+              return;
+            }
+          } else {
+            // non-interactive (cron/launchd): 스킵 + --force 안내
+            console.log(`[skip] 오늘 감면 성공 완료 (${todayCount}회 측정). 스킵합니다.`);
+            console.log(`       강제 실행하려면: npx damn-my-slow-kt run --force`);
+            db.close();
+            return;
+          }
+        }
+
+        // 오늘 최대 횟수 도달
+        if (todayCount >= maxAttempts) {
+          if (isInteractive) {
+            console.log(chalk.yellow(`\n⚠️  오늘 이미 ${todayCount}회 측정했습니다. (최대 ${maxAttempts}회)`));
+            const { proceed } = await inquirer.prompt([{
+              type: 'confirm',
+              name: 'proceed',
+              message: '최대 횟수를 초과하여 추가 측정하시겠습니까?',
+              default: false,
+            }]);
+            if (!proceed) {
+              db.close();
+              return;
+            }
+          } else {
+            console.log(`[skip] 오늘 ${todayCount}/${maxAttempts}회 완료. 스킵합니다.`);
+            console.log(`       강제 실행하려면: npx damn-my-slow-kt run --force`);
+            db.close();
+            return;
+          }
+        }
+      }
+
+      // ── 측정 실행 ──
       console.log(chalk.cyan('\n🐌 damn-my-slow-kt 실행'));
       console.log(`KT | ${opts.dryRun ? 'dry-run 모드' : '감면 신청 활성화'}`);
-      if (maxAttempts > 1) {
-        console.log(`최대 ${maxAttempts}회 측정 | ${intervalMin}분 간격 | 감면 성공 시 ${stopOnSuccess ? '중단' : '계속'}`);
+      if (todayCount > 0) {
+        console.log(chalk.dim(`오늘 ${todayCount + 1}번째 측정 (최대 ${maxAttempts}회)`));
       }
       console.log('');
 
-      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        if (maxAttempts > 1) {
-          console.log(chalk.bold(`\n── 측정 ${attempt}/${maxAttempts} ──`));
-        }
+      const provider = new KTProvider(cfg);
+      const measuredAt = new Date().toISOString();
 
-        const provider = new KTProvider(cfg);
-        const db = new SpeedDatabase(cfg.db_path);
-        const measuredAt = new Date().toISOString();
+      console.log(`측정 시작: ${measuredAt.slice(0, 19)}`);
+      if (!cfg.headless) {
+        console.log(chalk.dim('브라우저 창이 열립니다 (headless=false)'));
+      }
 
-        console.log(`측정 시작: ${measuredAt.slice(0, 19)}`);
-        if (!cfg.headless) {
-          console.log(chalk.dim('브라우저 창이 열립니다 (headless=false)'));
-        }
+      const result: SpeedTestResult = await provider.run(opts.dryRun);
 
-        let result: SpeedTestResult;
-        try {
-          result = await provider.run(opts.dryRun);
-        } catch (e: unknown) {
-          const err = e instanceof Error ? e : new Error(String(e));
-          console.error(chalk.red(`⚠️  측정 중 오류: ${err.message}`));
-          db.close();
+      const record = {
+        isp: 'kt',
+        measured_at: measuredAt,
+        download_mbps: result.download_mbps,
+        upload_mbps: result.upload_mbps,
+        ping_ms: result.ping_ms,
+        sla_result: result.sla_result,
+        complaint_filed: result.complaint_filed,
+        complaint_result: result.complaint_result,
+        raw_data: JSON.stringify(result.raw_data),
+        error: result.error,
+      };
 
-          // 오류 발생해도 다음 시도 계속
-          if (attempt < maxAttempts) {
-            console.log(chalk.dim(`${intervalMin}분 후 재시도합니다...`));
-            await sleep(intervalMin * 60 * 1000);
-            continue;
-          }
-          process.exit(1);
-        }
+      db.save(record);
+      db.close();
 
-        const record = {
-          isp: 'kt',
-          measured_at: measuredAt,
-          download_mbps: result.download_mbps,
-          upload_mbps: result.upload_mbps,
-          ping_ms: result.ping_ms,
-          sla_result: result.sla_result,
-          complaint_filed: result.complaint_filed,
-          complaint_result: result.complaint_result,
-          raw_data: JSON.stringify(result.raw_data),
-          error: result.error,
-        };
+      printRunResult(record);
+      await sendNotifications(cfg, record);
 
-        db.save(record);
-        db.close();
+      if (result.complaint_result === 'success') {
+        console.log(chalk.green('\n🎉 감면 신청 성공! 다음 스케줄 실행 시 자동으로 스킵됩니다.'));
+      }
 
-        printRunResult(record);
-        await sendNotifications(cfg, record);
-
-        // 감면 신청 성공 시 중단
-        if (stopOnSuccess && result.complaint_result === 'success') {
-          console.log(chalk.green('\n🎉 감면 신청 성공! 오늘 측정을 종료합니다.'));
-          break;
-        }
-
-        // SLA 통과 (속도 정상) → 다음 시도에서 재측정
-        if (result.sla_result === 'pass' && attempt < maxAttempts) {
-          console.log(chalk.dim(`\n속도 정상 (SLA pass). ${intervalMin}분 후 재측정합니다... (${attempt}/${maxAttempts})`));
-          await sleep(intervalMin * 60 * 1000);
-          continue;
-        }
-
-        // SLA fail인데 감면 신청 실패/스킵 → 다음 시도
-        if (result.sla_result === 'fail' && result.complaint_result !== 'success' && attempt < maxAttempts) {
-          console.log(chalk.dim(`\n감면 미완료. ${intervalMin}분 후 재시도합니다... (${attempt}/${maxAttempts})`));
-          await sleep(intervalMin * 60 * 1000);
-          continue;
-        }
-
-        // 마지막 시도이거나 더 이상 retry 불필요
-        if (attempt === maxAttempts && maxAttempts > 1) {
-          console.log(chalk.dim(`\n오늘 ${attempt}회 측정 완료.`));
-        }
+      if (result.error) {
+        console.error(`\n${chalk.red(`⚠️  오류 발생: ${result.error}`)}`);
+        process.exit(1);
       }
     });
 
