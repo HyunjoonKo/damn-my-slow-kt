@@ -45,7 +45,6 @@ interface SqliteStatement {
 function openSqlite(dbPath: string): SqliteDb | null {
   try {
     // Node 22.5+ built-in sqlite
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { DatabaseSync } = require('node:sqlite') as {
       DatabaseSync: new (path: string) => SqliteDb;
     };

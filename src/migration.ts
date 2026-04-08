@@ -7,7 +7,7 @@
 
 import chalk from 'chalk';
 import inquirer from 'inquirer';
-import { Config, saveConfig, DEFAULT_CONFIG_PATH } from './config';
+import { Config, saveConfig } from './config';
 import { installSchedule, removeSchedule, getPlatform } from './scheduler';
 
 /** 현재 최신 config version */

@@ -17,7 +17,6 @@ import inquirer from 'inquirer';
 import chalk from 'chalk';
 import path from 'path';
 import fs from 'fs';
-import os from 'os';
 
 import {
   loadConfig,
@@ -35,7 +34,6 @@ import { checkForUpdates } from './updater';
 import { checkAndRunMigrations, CURRENT_CONFIG_VERSION } from './migration';
 
 // package.json에서 버전 읽기
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const pkg = require('../package.json') as { version: string; name: string };
 
 export function buildCli(): Command {
