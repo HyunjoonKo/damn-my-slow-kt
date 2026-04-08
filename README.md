@@ -102,7 +102,12 @@ npx -y damn-my-slow-kt@latest init
 
 ---
 
-## NAS / Docker에서 실행
+## ~~NAS / Docker에서 실행~~
+
+> ⚠️ **현재 사용 불가** — KT 속도측정 프로그램이 macOS/Windows만 지원하므로, Linux 기반 Docker/NAS 환경에서는 SLA 측정이 불가능합니다.
+
+<details>
+<summary>참고: 이전 Docker 실행 방법 (KT가 Linux를 지원할 경우)</summary>
 
 Synology NAS 등 시스템 라이브러리가 부족한 환경에서는 Playwright 공식 Docker 이미지를 사용:
 
@@ -125,6 +130,8 @@ cron으로 자동 실행하려면 `/etc/crontab`에 직접 등록:
 0  6  * * * root  docker run --rm -v /var/services/homes/admin/.damn-my-slow-isp:/root/.damn-my-slow-isp mcr.microsoft.com/playwright:v1.52.0-noble npx -y damn-my-slow-kt@latest run >> /var/services/homes/admin/.damn-my-slow-isp/cron.log 2>&1
 ```
 
+</details>
+
 ---
 
 ## 테스트 완료 환경
@@ -139,10 +146,10 @@ cron으로 자동 실행하려면 `/etc/crontab`에 직접 등록:
 
 ## 요구사항
 
+- **macOS 또는 Windows** (KT 속도측정 프로그램 필수 — Linux 미지원)
 - Node.js 20+ (22+ 권장 — native SQLite 지원)
 - KT 인터넷 계정
 - 유선(LAN) 연결
-- NAS/서버: Docker 필요 (Playwright 시스템 라이브러리 의존성)
 
 ---
 
