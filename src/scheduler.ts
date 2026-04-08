@@ -319,13 +319,33 @@ function installCron(config: Config): void {
   lines.push(...cronLines);
 
   const newCrontab = lines.join('\n') + '\n';
+
+  // stdin 방식 먼저 시도 (표준 Linux)
   const proc = require('child_process').spawnSync('crontab', ['-'], {
     input: newCrontab,
     encoding: 'utf8',
   });
 
-  if (proc.status !== 0) {
-    throw new Error(`crontab 설치 실패: ${proc.stderr}`);
+  if (proc.status !== 0 || proc.error) {
+    // BusyBox(Synology NAS 등)는 crontab - (stdin) 미지원 → 임시 파일 방식으로 재시도
+    const tmpFile = path.join(os.tmpdir(), `damn-my-slow-kt-cron-${Date.now()}.tmp`);
+    try {
+      fs.writeFileSync(tmpFile, newCrontab, 'utf8');
+      const proc2 = require('child_process').spawnSync('crontab', [tmpFile], {
+        encoding: 'utf8',
+      });
+      if (proc2.status !== 0 || proc2.error) {
+        const errMsg =
+          (proc2.stderr as string | undefined) ||
+          proc2.error?.message ||
+          (proc.stderr as string | undefined) ||
+          proc.error?.message ||
+          'unknown error';
+        throw new Error(`crontab 설치 실패: ${errMsg}`);
+      }
+    } finally {
+      try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+    }
   }
 
   console.log(`✅ crontab 등록 완료`);
