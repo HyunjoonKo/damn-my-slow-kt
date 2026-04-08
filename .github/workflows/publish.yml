@@ -25,6 +25,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/setup-node@v4
         with:
@@ -48,25 +49,42 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Auto-bump patch version
+        if: steps.version.outputs.changed == 'false'
+        id: autobump
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          npm version patch --no-git-tag-version
+          NEW=$(node -p "require('./package.json').version")
+          git add package.json
+          git commit -m "chore: bump version to v${NEW} [skip ci]"
+          git push origin main
+          echo "version=${NEW}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve final version
+        id: final
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
       - name: Publish to npm
-        if: steps.version.outputs.changed == 'true'
+        if: steps.version.outputs.changed == 'true' || steps.autobump.outputs.version != ''
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create git tag
-        if: steps.version.outputs.changed == 'true'
+        if: steps.version.outputs.changed == 'true' || steps.autobump.outputs.version != ''
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git tag "v${{ steps.version.outputs.local }}"
-          git push origin "v${{ steps.version.outputs.local }}"
+          git tag "v${{ steps.final.outputs.version }}"
+          git push origin "v${{ steps.final.outputs.version }}"
 
       - name: Create GitHub release
-        if: steps.version.outputs.changed == 'true'
+        if: steps.version.outputs.changed == 'true' || steps.autobump.outputs.version != ''
         run: |
-          gh release create "v${{ steps.version.outputs.local }}" \
-            --title "v${{ steps.version.outputs.local }}" \
+          gh release create "v${{ steps.final.outputs.version }}" \
+            --title "v${{ steps.final.outputs.version }}" \
             --generate-notes
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
