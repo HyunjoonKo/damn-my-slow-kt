@@ -92,12 +92,6 @@ export function buildCli(): Command {
           validate: (v: string) => v.trim() !== '' || '비밀번호를 입력하세요.',
         },
         {
-          type: 'input',
-          name: 'plan_name',
-          message: '요금제 이름 (예: 기가라이트):',
-          default: '기가라이트',
-        },
-        {
           type: 'number',
           name: 'speed_mbps',
           message: '계약 속도 (Mbps):',
@@ -140,7 +134,7 @@ export function buildCli(): Command {
       const cfg: Config = {
         _config_version: defaults._config_version,
         credentials: { id: answers.id, password: answers.password },
-        plan: { name: answers.plan_name, speed_mbps: answers.speed_mbps },
+        plan: { speed_mbps: answers.speed_mbps },
         schedule: {
           time: '04:00',
           timezone: 'Asia/Seoul',
@@ -359,7 +353,7 @@ export function buildCli(): Command {
       console.log(`설정 버전: v${cfg._config_version}`);
       console.log(`계정 ID: ${cfg.credentials.id}`);
       console.log(`비밀번호: ${'*'.repeat(cfg.credentials.password.length)}`);
-      console.log(`요금제: ${cfg.plan.name} (${cfg.plan.speed_mbps} Mbps)`);
+      console.log(`계약 속도: ${cfg.plan.speed_mbps} Mbps`);
       console.log(`첫 측정: ${cfg.schedule.time} (${cfg.schedule.timezone})`);
       console.log(`최대 측정: ${cfg.schedule.max_attempts}회/일 | ${cfg.schedule.retry_interval_minutes}분 간격`);
       console.log(`감면 성공 시: ${cfg.schedule.stop_on_complaint_success ? '중단' : '계속 측정'}`);

@@ -17,7 +17,6 @@ export interface Credentials {
 }
 
 export interface Plan {
-  name: string;
   speed_mbps: number;
 }
 
@@ -54,7 +53,7 @@ export function getDefaultConfig(): Config {
   return {
     _config_version: 3,
     credentials: { id: '', password: '' },
-    plan: { name: '기가라이트', speed_mbps: 1000 },
+    plan: { speed_mbps: 1000 },
     schedule: {
       time: '04:00',
       timezone: 'Asia/Seoul',
@@ -96,7 +95,6 @@ export function loadConfig(configPath?: string): Config {
       password: creds.password || '',
     },
     plan: {
-      name: String(plan.name || '기가라이트'),
       speed_mbps: Number(plan.speed_mbps || 1000),
     },
     schedule: {
@@ -129,7 +127,6 @@ export function saveConfig(config: Config, configPath?: string): void {
       password: config.credentials.password,
     },
     plan: {
-      name: config.plan.name,
       speed_mbps: config.plan.speed_mbps,
     },
     schedule: {
@@ -163,7 +160,6 @@ credentials:
   password: "비밀번호"
 
 plan:
-  name: "기가라이트"
   speed_mbps: 1000  # 계약 속도 (Mbps) - 기가라이트: 1000, 기가프리미엄: 2000
 
 schedule:
