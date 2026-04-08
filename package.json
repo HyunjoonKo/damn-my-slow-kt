@@ -1,6 +1,6 @@
 {
   "name": "damn-my-slow-kt",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "KT 인터넷 SLA 속도 미달 시 요금 감면을 자동화하는 CLI 도구",
   "keywords": [
     "kt",
@@ -20,7 +20,7 @@
   },
   "license": "MIT",
   "bin": {
-    "damn-my-slow-kt": "./bin/damn-my-slow-kt"
+    "damn-my-slow-kt": "bin/damn-my-slow-kt"
   },
   "main": "dist/index.js",
   "files": [
