@@ -111,14 +111,7 @@ export function buildCli(): Command {
       if (existing) {
         console.log(chalk.dim("\n   기존 설정값이 표시됩니다. 엔터를 누르면 기존 값을 유지합니다."));
       }
-      console.log("");
       printSpeedAgentInstallGuide();
-      console.log(chalk.dim(`\n📋 KT 품질보장제도(SLA) 공식 안내:`));
-      console.log(
-        chalk.dim(
-          "   https://ermsweb.kt.com/search/faq/faqAnswerM.do?kbId=KNOW0002301063\n",
-        ),
-      );
 
       // 1단계: KT 아이디 먼저 수집
       const idAnswer = await inquirer.prompt([
