@@ -547,16 +547,50 @@ export function buildCli(): Command {
 
               if (retryDebug) {
                 console.log(chalk.yellow("\n🔍 디버그 모드로 재실행합니다..."));
-                console.log(
-                  chalk.dim(
-                    "   이번 실행은 이력 저장/감면 신청 없이 원인 파악만 수행합니다.",
-                  ),
-                );
                 console.log("");
 
                 const debugProvider = new KTProvider(cfg);
                 try {
-                  await debugProvider.run({ dryRun: true, debug: true });
+                  // 디버그 재실행도 일반 실행과 동일하게 이력 저장 + 감면 신청을 수행.
+                  // dryRun은 원 호출의 opt를 그대로 따라가고, debug만 강제 true.
+                  const debugMeasuredAt = new Date().toISOString();
+                  const debugResult = await debugProvider.run({
+                    dryRun: opts.dryRun,
+                    debug: true,
+                  });
+
+                  const debugRecord = {
+                    isp: "kt",
+                    measured_at: debugMeasuredAt,
+                    download_mbps: debugResult.download_mbps,
+                    upload_mbps: debugResult.upload_mbps,
+                    ping_ms: debugResult.ping_ms,
+                    sla_result: debugResult.sla_result,
+                    complaint_filed: debugResult.complaint_filed,
+                    complaint_result: debugResult.complaint_result,
+                    raw_data: JSON.stringify(debugResult.raw_data),
+                    error: debugResult.error,
+                  };
+
+                  const debugDb = new SpeedDatabase(cfg.db_path);
+                  debugDb.save(debugRecord);
+                  debugDb.close();
+
+                  printRunResult(debugRecord, cfg.plan.speed_mbps);
+                  await sendNotifications(cfg, debugRecord);
+
+                  if (debugResult.complaint_result === "success") {
+                    console.log(
+                      chalk.green(
+                        "\n🎉 감면 신청 성공! 다음 스케줄 실행 시 자동으로 스킵됩니다.",
+                      ),
+                    );
+                  }
+
+                  // 재실행이 정상 종료된 경우 1차 실행의 에러만으로 exit(1) 하지 않음.
+                  if (!debugResult.error) {
+                    return;
+                  }
                 } catch (e: unknown) {
                   const err = e instanceof Error ? e : new Error(String(e));
                   console.error(chalk.red(`디버그 재실행 중 예외: ${err.message}`));
