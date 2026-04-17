@@ -467,7 +467,17 @@ export class KTProvider {
       return 'no radio found';
     });
 
-    if (result && result !== 'no radio found') {
+    if (result === 'no radio found') {
+      // SLA 레이어는 열렸지만 회선 라디오 버튼이 없음 = 이 계정에 KT 인터넷 회선이 연결되어 있지 않음.
+      // #measureBtn 단계까지 내려가기 전에 여기서 명확한 원인으로 끊어야 이슈 #3의
+      // 다른 엣지 케이스(속도측정 프로그램 미설치, 새 기기 등록 등)와 혼동되지 않음.
+      throw new Error(
+        'KT 회선 정보를 찾을 수 없습니다. 이 계정에 KT 인터넷 회선이 연결되어 있는지 확인하세요. ' +
+          '(회선이 없는 계정으로는 SLA 측정이 불가능합니다)',
+      );
+    }
+
+    if (result) {
       info(`회선: ${result}`);
     }
 
@@ -483,7 +493,15 @@ export class KTProvider {
       await btn.waitFor({ state: 'visible', timeout: 5000 });
       await btn.click();
     } catch {
-      throw new Error('속도 측정 시작 버튼(#measureBtn)을 찾지 못했습니다');
+      // 회선 미보유 케이스는 selectLine() 단계에서 이미 걸러짐.
+      // 여기까지 와서 버튼이 안 뜨는 건 그 외 원인 (이슈 #3 참고).
+      throw new Error(
+        '속도 측정 시작 버튼(#measureBtn)을 찾지 못했습니다. 자주 발생하는 원인:\n' +
+          '  • KT 속도측정 프로그램 미설치 (https://speed.kt.com/file/ktspeed.pkg)\n' +
+          '  • 새 기기 등록 화면이 추가로 뜸\n' +
+          '  • 다회선 계정에서 주소지 선택 화면이 추가로 뜸\n' +
+          '  디버그 모드로 원인 확인: npx -y damn-my-slow-kt@latest run --debug',
+      );
     }
 
     await sleep(5000);
