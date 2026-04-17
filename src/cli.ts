@@ -299,6 +299,11 @@ export function buildCli(): Command {
     .option("--force", "오늘 완료 여부 무시하고 강제 실행", false)
     .option("-v, --verbose", "상세 로그 출력", false)
     .option("--screenshot", "측정 완료 후 스크린샷 저장", false)
+    .option(
+      "--debug",
+      "브라우저 창을 열고 느린 모드(slowMo)로 실행 — 문제 진단용",
+      false,
+    )
     .action(
       async (opts: {
         config: string;
@@ -306,6 +311,7 @@ export function buildCli(): Command {
         force: boolean;
         verbose: boolean;
         screenshot: boolean;
+        debug: boolean;
       }) => {
         // 업데이트 체크
         const noUpdateCheck = program.opts().noUpdateCheck as
@@ -446,7 +452,18 @@ export function buildCli(): Command {
           hour12: false,
         });
         console.log(`측정 시작: ${localTime}`);
-        if (cfg.headless) {
+        if (opts.debug) {
+          console.log(
+            chalk.yellow(
+              "🔍 디버그 모드: 브라우저 창을 열고 느린 속도로 실행합니다 (slowMo + DevTools)",
+            ),
+          );
+          console.log(
+            chalk.dim(
+              "   config 파일의 headless 설정을 무시하고 이번 실행만 임시로 끕니다.",
+            ),
+          );
+        } else if (cfg.headless) {
           console.log(chalk.dim("headless 모드로 실행합니다"));
         } else {
           console.log(chalk.dim("브라우저 창이 열립니다 (headless=false)"));
@@ -454,7 +471,7 @@ export function buildCli(): Command {
 
         let result: SpeedTestResult;
         try {
-          result = await provider.run(opts.dryRun);
+          result = await provider.run({ dryRun: opts.dryRun, debug: opts.debug });
         } catch (e: unknown) {
           const err = e instanceof Error ? e : new Error(String(e));
 
@@ -509,6 +526,63 @@ export function buildCli(): Command {
 
         if (result.error) {
           console.error(`\n${chalk.red(`⚠️  오류 발생: ${result.error}`)}`);
+
+          // 디버그 모드가 아니었다면 진단용 재실행 옵션 제공.
+          // 이슈 #3 댓글들처럼 환경별 엣지 케이스(새 기기 등록, 다회선 주소지 선택,
+          // 회선 미보유, 속도측정 프로그램 미설치 등)는 브라우저를 직접 관찰해야
+          // 원인을 파악할 수 있는 경우가 많음.
+          if (!opts.debug) {
+            if (isInteractive) {
+              // 인터랙티브 TTY: 바로 디버그 재실행 여부를 물어봄
+              console.error("");
+              const { retryDebug } = await inquirer.prompt([
+                {
+                  type: "confirm",
+                  name: "retryDebug",
+                  message:
+                    "브라우저 창을 열어서 어디서 막혔는지 직접 확인해보시겠습니까? (디버그 모드)",
+                  default: true,
+                },
+              ]);
+
+              if (retryDebug) {
+                console.log(chalk.yellow("\n🔍 디버그 모드로 재실행합니다..."));
+                console.log(
+                  chalk.dim(
+                    "   이번 실행은 이력 저장/감면 신청 없이 원인 파악만 수행합니다.",
+                  ),
+                );
+                console.log("");
+
+                const debugProvider = new KTProvider(cfg);
+                try {
+                  await debugProvider.run({ dryRun: true, debug: true });
+                } catch (e: unknown) {
+                  const err = e instanceof Error ? e : new Error(String(e));
+                  console.error(chalk.red(`디버그 재실행 중 예외: ${err.message}`));
+                }
+              }
+            } else {
+              // non-interactive(cron/launchd): 텍스트 안내만 출력
+              console.error("");
+              console.error(
+                chalk.yellow(
+                  "💡 원인을 확인하려면 터미널에서 아래 명령으로 다시 실행해보세요:",
+                ),
+              );
+              console.error(
+                chalk.bold(
+                  `     npx -y damn-my-slow-kt@latest run --debug${opts.dryRun ? " --dry-run" : ""}`,
+                ),
+              );
+              console.error(
+                chalk.dim(
+                  "   (브라우저 창이 열리고, 에러 발생 시 상태를 확인할 수 있도록 대기합니다)",
+                ),
+              );
+            }
+          }
+
           process.exit(1);
         }
       },

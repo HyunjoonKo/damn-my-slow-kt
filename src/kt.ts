@@ -78,6 +78,16 @@ export interface SpeedTestResult {
   error: string;
 }
 
+/**
+ * run() 실행 시 옵션.
+ * debug=true면 headless를 강제로 off, slowMo/devtools 켜고
+ * 에러 발생 시 브라우저를 사용자가 Enter 칠 때까지 닫지 않는다.
+ */
+export interface RunOptions {
+  dryRun?: boolean;
+  debug?: boolean;
+}
+
 function defaultResult(): SpeedTestResult {
   return {
     download_mbps: 0,
@@ -105,34 +115,41 @@ export class KTProvider {
     this.config = config;
   }
 
-  async run(dryRun = false): Promise<SpeedTestResult> {
+  async run(dryRunOrOptions: boolean | RunOptions = false): Promise<SpeedTestResult> {
+    // 하위 호환: 기존 호출 방식(boolean)은 dryRun만 지정.
+    // 새 호출 방식은 { dryRun, debug } 객체.
+    const options: RunOptions =
+      typeof dryRunOrOptions === 'boolean' ? { dryRun: dryRunOrOptions } : dryRunOrOptions;
+    const dryRun = options.dryRun === true;
+    const debug = options.debug === true;
+
     const result = defaultResult();
+
+    // 디버그 모드: 브라우저 창을 열고 각 동작을 slowMo로 느리게 실행.
+    // 원인 추정이 어려운 상황(이슈 #3의 신규 기기 등록/다회선 주소지 선택/회선 미보유 등)에서
+    // 사용자가 직접 브라우저를 관찰할 수 있게 한다. config.headless 값을 덮어씀.
+    const headless = debug ? false : this.config.headless;
+    const launchOptions = {
+      headless,
+      slowMo: debug ? 250 : 0,
+      devtools: debug,
+      args: [
+        '--no-sandbox',
+        '--disable-blink-features=AutomationControlled',
+        '--use-fake-ui-for-media-stream',
+        '--disable-web-security',
+      ],
+    };
 
     // Playwright 브라우저 바이너리가 없으면 자동 설치 (npx 첫 실행 시 필요)
     try {
-      this.browser = await chromium.launch({
-        headless: this.config.headless,
-        args: [
-          '--no-sandbox',
-          '--disable-blink-features=AutomationControlled',
-          '--use-fake-ui-for-media-stream',
-          '--disable-web-security',
-        ],
-      });
+      this.browser = await chromium.launch(launchOptions);
     } catch (e: unknown) {
       const err = e instanceof Error ? e : new Error(String(e));
       if (err.message.includes("Executable doesn't exist")) {
         console.log('📦 Chromium 브라우저 설치 중... (최초 1회)');
         execSync('npx playwright install chromium', { stdio: 'inherit' });
-        this.browser = await chromium.launch({
-          headless: this.config.headless,
-          args: [
-            '--no-sandbox',
-            '--disable-blink-features=AutomationControlled',
-            '--use-fake-ui-for-media-stream',
-            '--disable-web-security',
-          ],
-        });
+        this.browser = await chromium.launch(launchOptions);
       } else {
         throw e;
       }
@@ -212,6 +229,15 @@ export class KTProvider {
       } catch {
         // ignore
       }
+
+      // 디버그 모드 + 인터랙티브 TTY에서는 브라우저를 열어둔 채 사용자 확인 대기.
+      // 이슈 #3 같은 환경별 엣지 케이스를 눈으로 확인하기 위함.
+      if (debug && process.stdin.isTTY && process.stdout.isTTY) {
+        await this.waitForEnter(
+          chalk.yellow('\n🔍 디버그 모드: 브라우저에서 현재 상태를 확인하세요.\n') +
+            chalk.dim('   확인 후 Enter를 누르면 브라우저를 닫습니다... '),
+        );
+      }
     } finally {
       await this.context?.close();
       await this.browser?.close();
@@ -221,6 +247,27 @@ export class KTProvider {
     }
 
     return result;
+  }
+
+  /**
+   * 디버그 모드에서 사용자가 브라우저를 관찰할 시간을 주기 위해
+   * Enter 입력을 기다린다. TTY가 아니면 즉시 반환.
+   */
+  private waitForEnter(prompt: string): Promise<void> {
+    return new Promise((resolve) => {
+      if (!process.stdin.isTTY) {
+        resolve();
+        return;
+      }
+      process.stdout.write(prompt);
+      const onData = () => {
+        process.stdin.removeListener('data', onData);
+        process.stdin.pause();
+        resolve();
+      };
+      process.stdin.resume();
+      process.stdin.once('data', onData);
+    });
   }
 
   private async handleLogin(): Promise<void> {
