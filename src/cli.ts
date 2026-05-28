@@ -775,6 +775,50 @@ function speedBar(mbps: number, maxMbps: number, width = 30): string {
   return `${bar} ${chalk.bold(`${mbps.toFixed(1)}`)} Mbps ${chalk.dim(`(${pct})`)}`;
 }
 
+function displayWidth(text: string): number {
+  const plain = text.replace(/\u001b\[[0-9;]*m/g, '');
+
+  return Array.from(plain).reduce((width, char) => {
+    const code = char.codePointAt(0) ?? 0;
+    const isWide =
+      (code >= 0x1100 && code <= 0x115f) ||
+      (code >= 0x2329 && code <= 0x232a) ||
+      (code >= 0x2e80 && code <= 0xa4cf) ||
+      (code >= 0xac00 && code <= 0xd7a3) ||
+      (code >= 0xf900 && code <= 0xfaff) ||
+      (code >= 0xfe10 && code <= 0xfe19) ||
+      (code >= 0xfe30 && code <= 0xfe6f) ||
+      (code >= 0x2600 && code <= 0x27bf) ||
+      (code >= 0x1f300 && code <= 0x1faff) ||
+      (code >= 0xff00 && code <= 0xff60) ||
+      (code >= 0xffe0 && code <= 0xffe6);
+
+    return width + (isWide ? 2 : 1);
+  }, 0);
+}
+
+function truncateDisplay(text: string, maxWidth: number): string {
+  if (displayWidth(text) <= maxWidth) return text;
+
+  const ellipsis = '...';
+  const targetWidth = Math.max(0, maxWidth - displayWidth(ellipsis));
+  let result = '';
+  let width = 0;
+
+  for (const char of Array.from(text)) {
+    const nextWidth = displayWidth(char);
+    if (width + nextWidth > targetWidth) break;
+    result += char;
+    width += nextWidth;
+  }
+
+  return `${result}${ellipsis}`;
+}
+
+function padBoxContent(text: string, width: number): string {
+  return text + ' '.repeat(Math.max(0, width - displayWidth(text)));
+}
+
 function printRunResult(
   record: {
     sla_result: string;
@@ -783,6 +827,7 @@ function printRunResult(
     ping_ms: number;
     complaint_filed: boolean;
     complaint_result: string;
+    error?: string;
   },
   contractSpeed = 1000,
 ): void {
@@ -804,12 +849,22 @@ function printRunResult(
   );
   console.log(headerColor(`  ├${"─".repeat(46)}┤`));
 
-  // 속도 게이지
-  console.log(
-    headerColor("  │") +
-      `  ⬇ 다운로드  ${speedBar(record.download_mbps, contractSpeed, 20)}` +
-      headerColor("  │"),
-  );
+  if (record.error) {
+    const message = `  ⚠ ${record.error}`;
+    const trimmed = truncateDisplay(message, 46);
+    console.log(
+      headerColor("  │") +
+        padBoxContent(chalk.yellow(trimmed), 46) +
+        headerColor("│"),
+    );
+  } else {
+    // 속도 게이지
+    console.log(
+      headerColor("  │") +
+        `  ⬇ 다운로드  ${speedBar(record.download_mbps, contractSpeed, 20)}` +
+        headerColor("  │"),
+    );
+  }
 
   // 이의신청 결과
   if (

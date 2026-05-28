@@ -1,0 +1,75 @@
+/**
+ * kt.ts 결과 파싱 단위 테스트
+ * - Windows에서 KT 측정 프로그램 결과가 DOM에 전달되지 않는 경우 0Mbps PASS로 오판하지 않아야 한다.
+ */
+import { describe, expect, it } from 'vitest';
+import { parseMbpsValue, summarizeSlaResults } from '../src/kt';
+
+describe('parseMbpsValue', () => {
+  it('extracts Mbps values from formatted text', () => {
+    expect(parseMbpsValue('123.4 Mbps')).toBe(123.4);
+    expect(parseMbpsValue('1,234.5')).toBe(1234.5);
+  });
+
+  it('returns null when there is no numeric speed', () => {
+    expect(parseMbpsValue('')).toBeNull();
+    expect(parseMbpsValue('측정값 없음')).toBeNull();
+  });
+});
+
+describe('summarizeSlaResults', () => {
+  it('does not mark empty round speeds as PASS with 0Mbps', () => {
+    const summary = summarizeSlaResults({
+      rounds: [],
+      satisfyCount: 0,
+      failCount: 1,
+      totalCount: 1,
+      fullText: '테스트 횟수 1 번 중 SLA만족 횟수는 0 번, 미달 횟수는 1 번 입니다.',
+    });
+
+    expect(summary.downloadMbps).toBe(0);
+    expect(summary.slaResult).toBe('unknown');
+    expect(summary.error).toContain('회차별 다운로드 속도');
+    expect(summary.rawData).toMatchObject({
+      total: 1,
+      satisfy: 0,
+      fail: 1,
+      rounds: [],
+      parsed_speed_count: 0,
+    });
+  });
+
+  it('does not use text fallback when no speed values were parsed', () => {
+    const summary = summarizeSlaResults({
+      rounds: [],
+      satisfyCount: 0,
+      failCount: 0,
+      totalCount: 0,
+      fullText: 'SLA만족 횟수는 5 번 입니다.',
+    });
+
+    expect(summary.downloadMbps).toBe(0);
+    expect(summary.slaResult).toBe('unknown');
+    expect(summary.error).toContain('회차별 다운로드 속도');
+  });
+
+  it('averages completed round speeds and marks SLA fail on three failures', () => {
+    const summary = summarizeSlaResults({
+      rounds: [
+        { speed: '100 Mbps', slaRef: '500 Mbps', result: '미달', date: '1' },
+        { speed: '200 Mbps', slaRef: '500 Mbps', result: '미달', date: '2' },
+        { speed: '300 Mbps', slaRef: '500 Mbps', result: '미달', date: '3' },
+        { speed: '600 Mbps', slaRef: '500 Mbps', result: '만족', date: '4' },
+        { speed: '700 Mbps', slaRef: '500 Mbps', result: '만족', date: '5' },
+      ],
+      satisfyCount: 2,
+      failCount: 3,
+      totalCount: 5,
+      fullText: '',
+    });
+
+    expect(summary.downloadMbps).toBe(380);
+    expect(summary.slaResult).toBe('fail');
+    expect(summary.error).toBe('');
+  });
+});

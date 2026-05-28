@@ -24,6 +24,15 @@ import { Config, DATA_DIR } from './config';
 import chalk from 'chalk';
 
 const KT_SLA_INTRO_URL = 'https://speed.kt.com/sla/slatest/introduce.asp';
+const KT_SPEED_ORIGIN = 'https://speed.kt.com';
+const DEFAULT_BROWSER_USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' +
+  'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+  'Chrome/123.0.0.0 Safari/537.36';
+const WINDOWS_BROWSER_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
+  'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+  'Chrome/123.0.0.0 Safari/537.36';
 // TEST_TIMEOUT_MIN 환경변수로 타임아웃 조절 가능 (기본 40분)
 const SLA_TEST_TIMEOUT_MS = (parseInt(process.env.TEST_TIMEOUT_MIN || '0') || 40) * 60 * 1000;
 const POLL_INTERVAL_MS = 15 * 1000; // 15초 — 라운드 변화를 빠르게 감지
@@ -78,6 +87,87 @@ export interface SpeedTestResult {
   error: string;
 }
 
+export interface ParsedSlaRound {
+  speed: string;
+  slaRef: string;
+  result: string;
+  date: string;
+}
+
+export interface ParsedSlaResults {
+  rounds: ParsedSlaRound[];
+  satisfyCount: number;
+  failCount: number;
+  totalCount: number;
+  fullText: string;
+}
+
+export interface SlaResultSummary {
+  downloadMbps: number;
+  slaResult: SpeedTestResult['sla_result'];
+  rawData: Record<string, unknown>;
+  error: string;
+}
+
+export function parseMbpsValue(text: string): number | null {
+  const match = text.replace(/,/g, '').match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+
+  const value = Number(match[0]);
+  return Number.isFinite(value) ? value : null;
+}
+
+export function summarizeSlaResults(parsed: ParsedSlaResults): SlaResultSummary {
+  const speeds = parsed.rounds
+    .map((round) => parseMbpsValue(round.speed))
+    .filter((value): value is number => value !== null);
+
+  const rawData = {
+    total: parsed.totalCount,
+    satisfy: parsed.satisfyCount,
+    fail: parsed.failCount,
+    rounds: parsed.rounds,
+    parsed_speed_count: speeds.length,
+  };
+
+  if (speeds.length === 0) {
+    return {
+      downloadMbps: 0,
+      slaResult: 'unknown',
+      rawData,
+      error:
+        '측정 요약은 확인됐지만 회차별 다운로드 속도를 읽지 못했습니다. KT 측정 프로그램 결과 전달 상태를 확인하세요.',
+    };
+  }
+
+  if (parsed.totalCount > 0 && parsed.totalCount < 5) {
+    return {
+      downloadMbps: speeds.length > 0 ? speeds.reduce((a, b) => a + b, 0) / speeds.length : 0,
+      slaResult: 'unknown',
+      rawData,
+      error: `SLA 측정이 ${parsed.totalCount}/5회만 기록되어 완료되지 않았습니다.`,
+    };
+  }
+
+  const downloadMbps = speeds.length > 0 ? speeds.reduce((a, b) => a + b, 0) / speeds.length : 0;
+
+  let slaResult: SpeedTestResult['sla_result'] = 'unknown';
+  if (parsed.totalCount > 0) {
+    slaResult = parsed.failCount >= 3 ? 'fail' : 'pass';
+  } else if (parsed.fullText.includes('미달') && /[345]\s*번/.test(parsed.fullText)) {
+    slaResult = 'fail';
+  } else if (parsed.fullText.includes('만족')) {
+    slaResult = 'pass';
+  }
+
+  return {
+    downloadMbps,
+    slaResult,
+    rawData,
+    error: '',
+  };
+}
+
 /**
  * run() 실행 시 옵션.
  * debug=true면 headless를 강제로 off, slowMo/devtools 켜고
@@ -103,6 +193,18 @@ function defaultResult(): SpeedTestResult {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isChromeChannelMissingError(err: Error): boolean {
+  const message = err.message.toLowerCase();
+
+  return (
+    message.includes("executable doesn't exist") ||
+    message.includes("chromium distribution 'chrome' is not found") ||
+    message.includes('chrome is not installed') ||
+    message.includes('chrome not installed') ||
+    (message.includes("channel 'chrome'") && message.includes('not found'))
+  );
 }
 
 export class KTProvider {
@@ -141,27 +243,47 @@ export class KTProvider {
       ],
     };
 
-    // Playwright 브라우저 바이너리가 없으면 자동 설치 (npx 첫 실행 시 필요)
-    try {
-      this.browser = await chromium.launch(launchOptions);
-    } catch (e: unknown) {
-      const err = e instanceof Error ? e : new Error(String(e));
-      if (err.message.includes("Executable doesn't exist")) {
-        console.log('📦 Chromium 브라우저 설치 중... (최초 1회)');
-        execSync('npx playwright install chromium', { stdio: 'inherit' });
+    if (process.platform === 'win32') {
+      try {
+        this.browser = await chromium.launch({ ...launchOptions, channel: 'chrome' });
+      } catch (e: unknown) {
+        const err = e instanceof Error ? e : new Error(String(e));
+        if (!isChromeChannelMissingError(err)) {
+          throw err;
+        }
+        console.warn(chalk.yellow(`⚠ 시스템 Chrome을 찾지 못해 Playwright Chromium으로 재시도합니다: ${err.message.split('\n')[0]}`));
+      }
+    }
+
+    if (!this.browser) {
+      // Playwright 브라우저 바이너리가 없으면 자동 설치 (npx 첫 실행 시 필요)
+      try {
         this.browser = await chromium.launch(launchOptions);
-      } else {
-        throw e;
+      } catch (e: unknown) {
+        const err = e instanceof Error ? e : new Error(String(e));
+        if (err.message.includes("Executable doesn't exist")) {
+          console.log('📦 Chromium 브라우저 설치 중... (최초 1회)');
+          execSync('npx playwright install chromium', { stdio: 'inherit' });
+          this.browser = await chromium.launch(launchOptions);
+        } else {
+          throw e;
+        }
       }
     }
 
     this.context = await this.browser.newContext({
       userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' +
-        'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-        'Chrome/123.0.0.0 Safari/537.36',
+        process.platform === 'win32'
+          ? WINDOWS_BROWSER_USER_AGENT
+          : DEFAULT_BROWSER_USER_AGENT,
       viewport: { width: 1280, height: 900 },
     });
+
+    if (process.platform === 'win32') {
+      await this.context.grantPermissions(['local-network-access'], {
+        origin: KT_SPEED_ORIGIN,
+      });
+    }
 
     try {
       this.page = await this.context.newPage();
@@ -691,13 +813,15 @@ export class KTProvider {
         return result;
       }
 
-      // 회차별 속도를 평균으로 계산
-      const speeds = parsed.rounds
-        .map((r) => parseFloat(r.speed))
-        .filter((v) => !isNaN(v));
+      // 회차별 속도와 SLA 판정은 같은 기준으로 계산해야 알림/DB가 어긋나지 않는다.
+      const summary = summarizeSlaResults(parsed);
+      result.download_mbps = summary.downloadMbps;
+      result.sla_result = summary.slaResult;
+      result.raw_data = summary.rawData;
+      result.error = summary.error;
 
-      if (speeds.length > 0) {
-        result.download_mbps = speeds.reduce((a, b) => a + b, 0) / speeds.length;
+      if (summary.error) {
+        info(chalk.yellow(summary.error));
       }
 
       // SLA 결과 판정
@@ -705,19 +829,6 @@ export class KTProvider {
       if (totalCount > 0) {
         info(`전체 ${totalCount}회: 만족 ${satisfyCount}회, 미달 ${failCount}회`);
 
-        result.raw_data = {
-          total: totalCount,
-          satisfy: satisfyCount,
-          fail: failCount,
-          rounds: parsed.rounds,
-        };
-
-        // 5회 중 3회 이상 미달이면 SLA fail
-        if (failCount >= 3) {
-          result.sla_result = 'fail';
-        } else {
-          result.sla_result = 'pass';
-        }
       }
 
       // 개별 라운드 결과 출력
@@ -727,14 +838,7 @@ export class KTProvider {
         info(`  ${icon} ${round.speed} (기준: ${round.slaRef}) → ${round.result}`);
       }
 
-      // fallback: 텍스트 기반 판정
-      if (result.sla_result === 'unknown') {
-        if (parsed.fullText.includes('미달') && /[345]번/.test(parsed.fullText)) {
-          result.sla_result = 'fail';
-        } else if (parsed.fullText.includes('만족')) {
-          result.sla_result = 'pass';
-        }
-      }
+      // fallback 판정은 summarizeSlaResults()에서 처리한다.
     } catch (e: unknown) {
       const err = e instanceof Error ? e : new Error(String(e));
       info(chalk.red(`결과 파싱 실패: ${err.message}`));
