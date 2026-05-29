@@ -131,12 +131,16 @@ export function summarizeSlaResults(parsed: ParsedSlaResults): SlaResultSummary 
   };
 
   if (speeds.length === 0) {
+    const error =
+      parsed.totalCount > 0
+        ? '측정 요약은 확인됐지만 회차별 다운로드 속도를 읽지 못했습니다. KT 측정 프로그램 결과 전달 상태를 확인하세요.'
+        : '측정 결과 영역에서 회차별 다운로드 속도와 요약 정보를 읽지 못했습니다. KT 측정 프로그램 결과 전달 상태를 확인하세요.';
+
     return {
       downloadMbps: 0,
       slaResult: 'unknown',
       rawData,
-      error:
-        '측정 요약은 확인됐지만 회차별 다운로드 속도를 읽지 못했습니다. KT 측정 프로그램 결과 전달 상태를 확인하세요.',
+      error,
     };
   }
 

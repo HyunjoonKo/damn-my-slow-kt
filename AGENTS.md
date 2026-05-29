@@ -49,7 +49,7 @@ tests/
 > Run `tree -I node_modules -I dist` to see the full directory structure.
 
 ### Key Files Explained
-- **kt.ts** (~830 lines): The core business logic. Drives Playwright through KT's SLA test flow. Do NOT modify the browser automation selectors without verifying against the live site
+- **kt.ts** (~1,000 lines): The core business logic. Drives Playwright through KT's SLA test flow. Do NOT modify the browser automation selectors without verifying against the live site
 - **cli.ts** (~780 lines): All Commander commands. `run` validates required config fields (credentials + phone) via `validateRequiredFields()` before execution. `init --force` pre-fills prompts with existing config values
 - **config.ts** (~200 lines): YAML config load/save, interfaces, defaults, `validateRequiredFields()` for required field validation
 - **scheduler.ts** (~560 lines): Generates multiple launchd/systemd/cron triggers per day based on `max_attempts` and `retry_interval_minutes`

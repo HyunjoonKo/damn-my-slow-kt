@@ -50,7 +50,7 @@ describe('summarizeSlaResults', () => {
 
     expect(summary.downloadMbps).toBe(0);
     expect(summary.slaResult).toBe('unknown');
-    expect(summary.error).toContain('회차별 다운로드 속도');
+    expect(summary.error).toContain('요약 정보');
   });
 
   it('keeps partially completed rounds as unknown instead of final SLA result', () => {
@@ -70,6 +70,34 @@ describe('summarizeSlaResults', () => {
     expect(summary.downloadMbps).toBe(300);
     expect(summary.slaResult).toBe('unknown');
     expect(summary.error).toBe('SLA 측정이 4/5회만 기록되어 완료되지 않았습니다.');
+  });
+
+  it('uses text fallback for fail when speeds exist but summary counts are missing', () => {
+    const summary = summarizeSlaResults({
+      rounds: [{ speed: '120 Mbps', slaRef: '500 Mbps', result: '', date: '1' }],
+      satisfyCount: 0,
+      failCount: 0,
+      totalCount: 0,
+      fullText: '미달 횟수는 3 번 입니다.',
+    });
+
+    expect(summary.downloadMbps).toBe(120);
+    expect(summary.slaResult).toBe('fail');
+    expect(summary.error).toBe('');
+  });
+
+  it('uses text fallback for pass when speeds exist but summary counts are missing', () => {
+    const summary = summarizeSlaResults({
+      rounds: [{ speed: '800 Mbps', slaRef: '500 Mbps', result: '', date: '1' }],
+      satisfyCount: 0,
+      failCount: 0,
+      totalCount: 0,
+      fullText: 'SLA만족 횟수는 5 번 입니다.',
+    });
+
+    expect(summary.downloadMbps).toBe(800);
+    expect(summary.slaResult).toBe('pass');
+    expect(summary.error).toBe('');
   });
 
   it('averages completed round speeds and marks SLA fail on three failures', () => {
