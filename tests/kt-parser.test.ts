@@ -100,6 +100,20 @@ describe('summarizeSlaResults', () => {
     expect(summary.error).toBe('');
   });
 
+  it('does not use total test count as fallback fail count', () => {
+    const summary = summarizeSlaResults({
+      rounds: [{ speed: '800 Mbps', slaRef: '500 Mbps', result: '', date: '1' }],
+      satisfyCount: 0,
+      failCount: 0,
+      totalCount: 0,
+      fullText: '테스트 횟수 5 번 중 SLA만족 횟수는 5 번, 미달 횟수는 0 번 입니다.',
+    });
+
+    expect(summary.downloadMbps).toBe(800);
+    expect(summary.slaResult).toBe('pass');
+    expect(summary.error).toBe('');
+  });
+
   it('averages completed round speeds and marks SLA fail on three failures', () => {
     const summary = summarizeSlaResults({
       rounds: [
