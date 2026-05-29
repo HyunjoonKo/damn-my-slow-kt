@@ -142,14 +142,14 @@ export function summarizeSlaResults(parsed: ParsedSlaResults): SlaResultSummary 
 
   if (parsed.totalCount > 0 && parsed.totalCount < 5) {
     return {
-      downloadMbps: speeds.length > 0 ? speeds.reduce((a, b) => a + b, 0) / speeds.length : 0,
+      downloadMbps: speeds.reduce((a, b) => a + b, 0) / speeds.length,
       slaResult: 'unknown',
       rawData,
       error: `SLA 측정이 ${parsed.totalCount}/5회만 기록되어 완료되지 않았습니다.`,
     };
   }
 
-  const downloadMbps = speeds.length > 0 ? speeds.reduce((a, b) => a + b, 0) / speeds.length : 0;
+  const downloadMbps = speeds.reduce((a, b) => a + b, 0) / speeds.length;
 
   let slaResult: SpeedTestResult['sla_result'] = 'unknown';
   if (parsed.totalCount > 0) {
@@ -828,7 +828,6 @@ export class KTProvider {
       const { satisfyCount, failCount, totalCount } = parsed;
       if (totalCount > 0) {
         info(`전체 ${totalCount}회: 만족 ${satisfyCount}회, 미달 ${failCount}회`);
-
       }
 
       // 개별 라운드 결과 출력

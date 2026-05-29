@@ -53,6 +53,25 @@ describe('summarizeSlaResults', () => {
     expect(summary.error).toContain('회차별 다운로드 속도');
   });
 
+  it('keeps partially completed rounds as unknown instead of final SLA result', () => {
+    const summary = summarizeSlaResults({
+      rounds: [
+        { speed: '100 Mbps', slaRef: '500 Mbps', result: '미달', date: '1' },
+        { speed: '200 Mbps', slaRef: '500 Mbps', result: '미달', date: '2' },
+        { speed: '300 Mbps', slaRef: '500 Mbps', result: '미달', date: '3' },
+        { speed: '600 Mbps', slaRef: '500 Mbps', result: '만족', date: '4' },
+      ],
+      satisfyCount: 1,
+      failCount: 3,
+      totalCount: 4,
+      fullText: '테스트 횟수 4 번 중 SLA만족 횟수는 1 번, 미달 횟수는 3 번 입니다.',
+    });
+
+    expect(summary.downloadMbps).toBe(300);
+    expect(summary.slaResult).toBe('unknown');
+    expect(summary.error).toBe('SLA 측정이 4/5회만 기록되어 완료되지 않았습니다.');
+  });
+
   it('averages completed round speeds and marks SLA fail on three failures', () => {
     const summary = summarizeSlaResults({
       rounds: [

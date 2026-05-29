@@ -111,7 +111,7 @@ tests/
 |---------|---------|------------------|
 | chalk | ^4.x | CJS compatible (v5 is ESM-only) |
 | inquirer | ^8.x | CJS compatible (v9+ is ESM-only) |
-| playwright | ^1.x | KT SLA test requires Chromium |
+| playwright | ^1.59.x | KT SLA test requires Chromium; Windows local-network-access grant requires 1.56+ |
 | commander | ^12.x | CLI framework |
 | axios | ^1.x | HTTP client for notifications + update check |
 | js-yaml | ^4.x | Config file parsing |
