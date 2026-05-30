@@ -867,8 +867,6 @@ export class KTProvider {
         await this.saveHtmlSnapshot(`round-${status.completedRounds}`);
       }
 
-      const roundsDone = status.completedRounds || status.totalCount;
-
       // 완료 조건: 5개 회차의 측정값이 모두 채워짐
       // (페이지가 "측정중" 텍스트를 유지하더라도, 5개 속도값이 있으면 완료)
       if (status.completedRounds >= SLA_ROUND_TOTAL) {
@@ -877,8 +875,8 @@ export class KTProvider {
         info(`${SLA_ROUND_TOTAL}회 측정 완료!`);
         await this.saveHtmlSnapshot('complete');
         break;
-      } else if (roundsDone > 0) {
-        measureProgress(roundsDone, SLA_ROUND_TOTAL, elapsed);
+      } else if (status.completedRounds > 0) {
+        measureProgress(status.completedRounds, SLA_ROUND_TOTAL, elapsed);
         if (status.countdown) {
           if (process.stdout.isTTY) {
             process.stdout.write(`${chalk.dim(` 다음: ${status.countdown}`)}\x1b[K`);
