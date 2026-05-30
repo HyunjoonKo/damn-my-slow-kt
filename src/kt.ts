@@ -126,6 +126,11 @@ export function summarizeSlaResults(parsed: ParsedSlaResults): SlaResultSummary 
   const speeds = parsed.rounds
     .map((round) => parseMbpsValue(round.speed))
     .filter((value): value is number => value !== null);
+  const slaRefs = parsed.rounds
+    .map((round) => parseMbpsValue(round.slaRef))
+    .filter((value): value is number => value !== null);
+  const slaReferenceMbps = slaRefs.length > 0 ? Math.max(...slaRefs) : null;
+  const inferredPlanMbps = slaReferenceMbps !== null ? slaReferenceMbps * 2 : null;
 
   const rawData = {
     total: parsed.totalCount,
@@ -133,6 +138,8 @@ export function summarizeSlaResults(parsed: ParsedSlaResults): SlaResultSummary 
     fail: parsed.failCount,
     rounds: parsed.rounds,
     parsed_speed_count: speeds.length,
+    sla_ref_mbps: slaReferenceMbps,
+    inferred_plan_mbps: inferredPlanMbps,
   };
 
   if (speeds.length === 0) {

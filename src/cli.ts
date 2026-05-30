@@ -775,6 +775,41 @@ function speedBar(mbps: number, maxMbps: number, width = 30): string {
   return `${bar} ${chalk.bold(`${mbps.toFixed(1)}`)} Mbps ${chalk.dim(`(${pct})`)}`;
 }
 
+function getNumberValue(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function inferContractSpeedFromRawData(rawData: string | undefined): number | null {
+  if (!rawData) return null;
+
+  try {
+    const parsed = JSON.parse(rawData) as {
+      inferred_plan_mbps?: unknown;
+      sla_ref_mbps?: unknown;
+      rounds?: Array<{ slaRef?: unknown }>;
+    };
+
+    const inferredPlan = getNumberValue(parsed.inferred_plan_mbps);
+    if (inferredPlan !== null) return inferredPlan;
+
+    const slaRef = getNumberValue(parsed.sla_ref_mbps);
+    if (slaRef !== null) return slaRef * 2;
+
+    const roundRefs =
+      parsed.rounds
+        ?.map((round) =>
+          typeof round.slaRef === 'string'
+            ? Number(round.slaRef.replace(/,/g, '').match(/\d+(?:\.\d+)?/)?.[0])
+            : null,
+        )
+        .filter((value): value is number => value !== null && Number.isFinite(value) && value > 0) || [];
+
+    return roundRefs.length > 0 ? Math.max(...roundRefs) * 2 : null;
+  } catch {
+    return null;
+  }
+}
+
 function displayWidth(text: string): number {
   const plain = text.replace(/\u001b\[[0-9;]*m/g, '');
 
@@ -827,12 +862,15 @@ function printRunResult(
     ping_ms: number;
     complaint_filed: boolean;
     complaint_result: string;
+    raw_data?: string;
     error?: string;
   },
   contractSpeed = 1000,
 ): void {
   const isFail = record.sla_result === "fail";
   const isPass = record.sla_result === "pass";
+  const displayContractSpeed =
+    inferContractSpeedFromRawData(record.raw_data) || contractSpeed;
 
   // 상단 구분선
   const headerColor = isFail ? chalk.red : isPass ? chalk.green : chalk.yellow;
@@ -861,7 +899,7 @@ function printRunResult(
     // 속도 게이지
     console.log(
       headerColor("  │") +
-        `  ⬇ 다운로드  ${speedBar(record.download_mbps, contractSpeed, 20)}` +
+        `  ⬇ 다운로드  ${speedBar(record.download_mbps, displayContractSpeed, 20)}` +
         headerColor("  │"),
     );
   }

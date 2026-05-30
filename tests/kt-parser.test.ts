@@ -72,6 +72,24 @@ describe('summarizeSlaResults', () => {
     expect(summary.error).toBe('SLA 측정이 4/5회만 기록되어 완료되지 않았습니다.');
   });
 
+  it('stores inferred plan speed from KT SLA reference', () => {
+    const summary = summarizeSlaResults({
+      rounds: [
+        { speed: '481.6 Mbps', slaRef: '250 Mbps', result: '만족', date: '1' },
+        { speed: '477.7 Mbps', slaRef: '250 Mbps', result: '만족', date: '2' },
+      ],
+      satisfyCount: 2,
+      failCount: 0,
+      totalCount: 2,
+      fullText: '테스트 횟수 2 번 중 SLA만족 횟수는 2 번, 미달 횟수는 0 번 입니다.',
+    });
+
+    expect(summary.rawData).toMatchObject({
+      sla_ref_mbps: 250,
+      inferred_plan_mbps: 500,
+    });
+  });
+
   it('uses text fallback for fail when speeds exist but summary counts are missing', () => {
     const summary = summarizeSlaResults({
       rounds: [{ speed: '120 Mbps', slaRef: '500 Mbps', result: '', date: '1' }],
