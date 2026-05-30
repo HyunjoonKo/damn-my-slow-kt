@@ -31,6 +31,7 @@ const DEFAULT_BROWSER_USER_AGENT =
   'Chrome/123.0.0.0 Safari/537.36';
 const SLA_ROUND_TOTAL = 5;
 const SLA_FAIL_THRESHOLD = Math.ceil(SLA_ROUND_TOTAL / 2);
+const WORKFLOW_STEP_TOTAL = 5;
 // TEST_TIMEOUT_MIN 환경변수로 타임아웃 조절 가능 (기본 40분)
 const SLA_TEST_TIMEOUT_MS = (parseInt(process.env.TEST_TIMEOUT_MIN || '0') || 40) * 60 * 1000;
 const POLL_INTERVAL_MS = 15 * 1000; // 15초 — 라운드 변화를 빠르게 감지
@@ -38,11 +39,11 @@ const POLL_INTERVAL_MS = 15 * 1000; // 15초 — 라운드 변화를 빠르게 �
 // ─── 진행 UI 헬퍼 ────────────────────────────────────────────────
 
 const STEPS = {
-  login:   { num: 1, total: SLA_ROUND_TOTAL, label: '로그인' },
-  layer:   { num: 2, total: SLA_ROUND_TOTAL, label: 'SLA 테스트 준비' },
-  measure: { num: 3, total: SLA_ROUND_TOTAL, label: '속도 측정' },
-  parse:   { num: 4, total: SLA_ROUND_TOTAL, label: '결과 분석' },
-  action:  { num: 5, total: SLA_ROUND_TOTAL, label: '감면 처리' },
+  login:   { num: 1, total: WORKFLOW_STEP_TOTAL, label: '로그인' },
+  layer:   { num: 2, total: WORKFLOW_STEP_TOTAL, label: 'SLA 테스트 준비' },
+  measure: { num: 3, total: WORKFLOW_STEP_TOTAL, label: '속도 측정' },
+  parse:   { num: 4, total: WORKFLOW_STEP_TOTAL, label: '결과 분석' },
+  action:  { num: 5, total: WORKFLOW_STEP_TOTAL, label: '감면 처리' },
 };
 
 function stepHeader(step: { num: number; total: number; label: string }): void {
@@ -281,6 +282,7 @@ export class KTProvider {
     }
 
     this.context = await this.browser.newContext({
+      // Windows의 KT 측정 프로그램 탐지는 브라우저 정보에 민감해서 실제 Chrome UA를 그대로 둔다.
       ...(process.platform === 'win32' ? {} : { userAgent: DEFAULT_BROWSER_USER_AGENT }),
       viewport: { width: 1280, height: 900 },
     });
