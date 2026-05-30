@@ -45,6 +45,7 @@ import { checkAndRunMigrations, CURRENT_CONFIG_VERSION } from "./migration";
 
 // package.json에서 버전 읽기
 const pkg = require("../package.json") as { version: string; name: string };
+const KT_SLA_GUARANTEE_RATIO = 0.5;
 
 export function buildCli(): Command {
   const program = new Command();
@@ -779,6 +780,10 @@ function getNumberValue(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
 }
 
+function inferPlanSpeedFromSlaReference(slaRefMbps: number): number {
+  return slaRefMbps / KT_SLA_GUARANTEE_RATIO;
+}
+
 function inferContractSpeedFromRawData(rawData: string | undefined): number | null {
   if (!rawData) return null;
 
@@ -793,7 +798,7 @@ function inferContractSpeedFromRawData(rawData: string | undefined): number | nu
     if (inferredPlan !== null) return inferredPlan;
 
     const slaRef = getNumberValue(parsed.sla_ref_mbps);
-    if (slaRef !== null) return slaRef * 2;
+    if (slaRef !== null) return inferPlanSpeedFromSlaReference(slaRef);
 
     const roundRefs =
       parsed.rounds
@@ -804,7 +809,9 @@ function inferContractSpeedFromRawData(rawData: string | undefined): number | nu
         )
         .filter((value): value is number => value !== null && Number.isFinite(value) && value > 0) || [];
 
-    return roundRefs.length > 0 ? Math.max(...roundRefs) * 2 : null;
+    return roundRefs.length > 0
+      ? inferPlanSpeedFromSlaReference(Math.max(...roundRefs))
+      : null;
   } catch {
     return null;
   }
@@ -854,6 +861,10 @@ function padBoxContent(text: string, width: number): string {
   return text + ' '.repeat(Math.max(0, width - displayWidth(text)));
 }
 
+function boxLine(content: string, width: number, color: typeof chalk.green): string {
+  return color("  │") + padBoxContent(content, width) + color("│");
+}
+
 function printRunResult(
   record: {
     sla_result: string;
@@ -876,32 +887,22 @@ function printRunResult(
   const headerColor = isFail ? chalk.red : isPass ? chalk.green : chalk.yellow;
   const headerIcon = isFail ? "❌" : isPass ? "✅" : "⚠️";
   const headerText = isFail ? "SLA 미달" : isPass ? "SLA 통과" : "SLA 불명";
+  const headerLine = `  ${headerIcon}  ${chalk.bold(headerText)}`;
+  const bodyLine = record.error
+    ? chalk.yellow(truncateDisplay(`  ⚠ ${record.error}`, 80))
+    : `  ⬇ 다운로드  ${speedBar(record.download_mbps, displayContractSpeed, 20)}`;
+  const boxWidth = Math.max(46, displayWidth(headerLine), displayWidth(bodyLine));
 
   console.log("");
-  console.log(headerColor(`  ┌${"─".repeat(46)}┐`));
-  console.log(
-    headerColor(`  │`) +
-      `  ${headerIcon}  ${chalk.bold(headerText)}` +
-      " ".repeat(46 - headerText.length * 2 - 6) +
-      headerColor("│"),
-  );
-  console.log(headerColor(`  ├${"─".repeat(46)}┤`));
+  console.log(headerColor(`  ┌${"─".repeat(boxWidth)}┐`));
+  console.log(boxLine(headerLine, boxWidth, headerColor));
+  console.log(headerColor(`  ├${"─".repeat(boxWidth)}┤`));
 
   if (record.error) {
-    const message = `  ⚠ ${record.error}`;
-    const trimmed = truncateDisplay(message, 46);
-    console.log(
-      headerColor("  │") +
-        padBoxContent(chalk.yellow(trimmed), 46) +
-        headerColor("│"),
-    );
+    console.log(boxLine(bodyLine, boxWidth, headerColor));
   } else {
     // 속도 게이지
-    console.log(
-      headerColor("  │") +
-        `  ⬇ 다운로드  ${speedBar(record.download_mbps, displayContractSpeed, 20)}` +
-        headerColor("  │"),
-    );
+    console.log(boxLine(bodyLine, boxWidth, headerColor));
   }
 
   // 이의신청 결과
@@ -909,33 +910,18 @@ function printRunResult(
     record.complaint_filed ||
     (isFail && record.complaint_result === "skipped")
   ) {
-    console.log(headerColor(`  ├${"─".repeat(46)}┤`));
+    console.log(headerColor(`  ├${"─".repeat(boxWidth)}┤`));
 
     if (record.complaint_result === "success") {
-      console.log(
-        headerColor("  │") +
-          chalk.green("  🎉 감면 신청 성공!") +
-          " ".repeat(27) +
-          headerColor("│"),
-      );
+      console.log(boxLine(chalk.green("  🎉 감면 신청 성공!"), boxWidth, headerColor));
     } else if (record.complaint_result === "failed") {
-      console.log(
-        headerColor("  │") +
-          chalk.red("  ⚠️  감면 신청 실패") +
-          " ".repeat(27) +
-          headerColor("│"),
-      );
+      console.log(boxLine(chalk.red("  ⚠️  감면 신청 실패"), boxWidth, headerColor));
     } else if (record.complaint_result === "skipped") {
-      console.log(
-        headerColor("  │") +
-          chalk.dim("  📋 감면 신청 생략 (dry-run)") +
-          " ".repeat(19) +
-          headerColor("│"),
-      );
+      console.log(boxLine(chalk.dim("  📋 감면 신청 생략 (dry-run)"), boxWidth, headerColor));
     }
   }
 
-  console.log(headerColor(`  └${"─".repeat(46)}┘`));
+  console.log(headerColor(`  └${"─".repeat(boxWidth)}┘`));
 }
 
 // ─── KT 속도측정 프로그램 설치 안내 ────────────────────────────────
