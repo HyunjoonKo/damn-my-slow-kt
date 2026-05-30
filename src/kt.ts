@@ -73,11 +73,12 @@ function measureProgress(round: number, total: number, elapsedMs: number): void 
   const empty = total - round;
   const bar = chalk.green('■'.repeat(filled)) + chalk.gray('□'.repeat(empty));
   const elapsed = formatElapsed(elapsedMs);
+  const line = `       ${bar}  ${round}/${total}회 완료  ${chalk.dim(elapsed)}  `;
   // 커서를 줄 앞으로 이동하여 같은 줄에 덮어쓰기
   if (process.stdout.isTTY) {
-    process.stdout.write(`\r       ${bar}  ${round}/${total}회 완료  ${chalk.dim(elapsed)}  `);
+    process.stdout.write(`\r${line}\x1b[K`);
   } else {
-    console.log(`       ${bar}  ${round}/${total}회 완료  ${elapsed}`);
+    console.log(line);
   }
 }
 
@@ -857,7 +858,7 @@ export class KTProvider {
           const r = status.rounds[i];
           const isFail = r.result.includes('미달');
           const icon = isFail ? '❌' : '✅';
-          if (process.stdout.isTTY) console.log(''); // 진행 바 줄바꿈
+          if (process.stdout.isTTY) process.stdout.write('\n'); // 진행 바 줄바꿈
           info(`${icon} ${i + 1}회차: ${r.speed} (기준 ${r.slaRef}) → ${r.result}  [${r.date}]`);
         }
         lastReportedRound = status.completedRounds;
@@ -880,7 +881,7 @@ export class KTProvider {
         measureProgress(roundsDone, SLA_ROUND_TOTAL, elapsed);
         if (status.countdown) {
           if (process.stdout.isTTY) {
-            process.stdout.write(chalk.dim(` 다음: ${status.countdown}`));
+            process.stdout.write(`${chalk.dim(` 다음: ${status.countdown}`)}\x1b[K`);
           }
         }
       }
