@@ -17,8 +17,9 @@
  */
 
 import { Browser, BrowserContext, Page, chromium } from 'playwright';
-import { execSync } from 'child_process';
+import { execSync, spawn } from 'child_process';
 import fs from 'fs';
+import net from 'net';
 import path from 'path';
 import { Config, DATA_DIR } from './config';
 import chalk from 'chalk';
@@ -32,6 +33,11 @@ const DEFAULT_BROWSER_USER_AGENT =
 const SLA_ROUND_TOTAL = 5;
 const SLA_FAIL_THRESHOLD = Math.ceil(SLA_ROUND_TOTAL / 2);
 const WORKFLOW_STEP_TOTAL = 5;
+const KT_SPEED_CLIENT_PORT = 10055;
+const KT_SPEED_CLIENT_PATHS = [
+  path.join(process.env['ProgramFiles(x86)'] || '', 'KTSpeedClient', 'kt-speed-client.exe'),
+  path.join(process.env.ProgramFiles || '', 'KTSpeedClient', 'kt-speed-client.exe'),
+].filter(Boolean);
 // TEST_TIMEOUT_MIN 환경변수로 타임아웃 조절 가능 (기본 40분)
 const SLA_TEST_TIMEOUT_MS = (parseInt(process.env.TEST_TIMEOUT_MIN || '0') || 40) * 60 * 1000;
 const POLL_INTERVAL_MS = 15 * 1000; // 15초 — 라운드 변화를 빠르게 감지
@@ -217,6 +223,29 @@ function isChromeChannelMissingError(err: Error): boolean {
   );
 }
 
+function canConnectToLocalPort(port: number, timeoutMs = 1000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host: '127.0.0.1', port });
+    let settled = false;
+
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(ok);
+    };
+
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+  });
+}
+
+function findWindowsSpeedClientPath(): string | null {
+  return KT_SPEED_CLIENT_PATHS.find((candidate) => fs.existsSync(candidate)) || null;
+}
+
 export class KTProvider {
   private config: Config;
   private browser: Browser | null = null;
@@ -252,6 +281,8 @@ export class KTProvider {
         '--disable-web-security',
       ],
     };
+
+    await this.ensureWindowsSpeedClientRunning();
 
     if (process.platform === 'win32') {
       try {
@@ -384,6 +415,39 @@ export class KTProvider {
     }
 
     return result;
+  }
+
+  private async ensureWindowsSpeedClientRunning(): Promise<void> {
+    if (process.platform !== 'win32') return;
+
+    if (await canConnectToLocalPort(KT_SPEED_CLIENT_PORT)) {
+      info('KTSpeedClient 로컬 서버 확인됨');
+      return;
+    }
+
+    const clientPath = findWindowsSpeedClientPath();
+    if (!clientPath) {
+      console.warn(chalk.yellow('⚠ KTSpeedClient 실행 파일을 찾지 못했습니다. KT 페이지에서 설치 안내가 표시될 수 있습니다.'));
+      return;
+    }
+
+    info('KTSpeedClient 로컬 서버가 없어 실행합니다...');
+    const child = spawn(clientPath, {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    child.unref();
+
+    for (let i = 0; i < 10; i++) {
+      await sleep(1000);
+      if (await canConnectToLocalPort(KT_SPEED_CLIENT_PORT)) {
+        info('KTSpeedClient 로컬 서버 시작 확인');
+        return;
+      }
+    }
+
+    console.warn(chalk.yellow('⚠ KTSpeedClient를 실행했지만 로컬 서버가 열리지 않았습니다. KT 페이지에서 설치 안내가 표시될 수 있습니다.'));
   }
 
   /**
