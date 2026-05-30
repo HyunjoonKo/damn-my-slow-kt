@@ -48,7 +48,7 @@
     "commander": "^12.0.0",
     "inquirer": "^8.2.6",
     "js-yaml": "^4.1.0",
-    "playwright": "^1.59.0"
+    "playwright": "^1.59.1"
   },
   "devDependencies": {
     "@action-validator/cli": "^0.6.0",

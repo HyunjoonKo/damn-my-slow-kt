@@ -29,10 +29,6 @@ const DEFAULT_BROWSER_USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' +
   'AppleWebKit/537.36 (KHTML, like Gecko) ' +
   'Chrome/123.0.0.0 Safari/537.36';
-const WINDOWS_BROWSER_USER_AGENT =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
-  'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-  'Chrome/123.0.0.0 Safari/537.36';
 const SLA_ROUND_TOTAL = 5;
 const SLA_FAIL_THRESHOLD = Math.ceil(SLA_ROUND_TOTAL / 2);
 // TEST_TIMEOUT_MIN 환경변수로 타임아웃 조절 가능 (기본 40분)
@@ -285,10 +281,7 @@ export class KTProvider {
     }
 
     this.context = await this.browser.newContext({
-      userAgent:
-        process.platform === 'win32'
-          ? WINDOWS_BROWSER_USER_AGENT
-          : DEFAULT_BROWSER_USER_AGENT,
+      ...(process.platform === 'win32' ? {} : { userAgent: DEFAULT_BROWSER_USER_AGENT }),
       viewport: { width: 1280, height: 900 },
     });
 
@@ -705,13 +698,13 @@ export class KTProvider {
       elapsed += POLL_INTERVAL_MS;
 
       // 구조화된 CSS 클래스로 회차별 결과를 직접 파싱
-      const status = await page.evaluate(() => {
+      const status = await page.evaluate((roundTotal) => {
         const ifArea = document.getElementById('ifArea');
         if (!ifArea) return null;
 
         // 회차별 상세 결과
         const rounds: Array<{ speed: string; slaRef: string; result: string; date: string }> = [];
-        for (let i = 1; i <= SLA_ROUND_TOTAL; i++) {
+        for (let i = 1; i <= roundTotal; i++) {
           const speed = ifArea.querySelector(`.step-table-speed-${i}`)?.textContent?.trim() || '';
           const slaRef = ifArea.querySelector(`.step-table-default-${i}`)?.textContent?.trim() || '';
           const resultText = ifArea.querySelector(`.step-table-result-${i}`)?.textContent?.trim() || '';
@@ -733,7 +726,7 @@ export class KTProvider {
         const totalCount = totalMatch ? parseInt(totalMatch[1]) : 0;
 
         return { rounds, completedRounds, isMeasuring, countdown, totalCount, textSnippet: fullText.slice(0, 200) };
-      });
+      }, SLA_ROUND_TOTAL);
 
       if (!status) continue;
 
@@ -797,13 +790,13 @@ export class KTProvider {
 
     try {
       // 구조화된 DOM에서 회차별 데이터를 직접 추출
-      const parsed = await page.evaluate(() => {
+      const parsed = await page.evaluate((roundTotal) => {
         const ifArea = document.getElementById('ifArea');
         if (!ifArea) return null;
 
         // 회차별 결과 파싱 — CSS 클래스 기반
         const rounds: Array<{ speed: string; slaRef: string; result: string; date: string }> = [];
-        for (let i = 1; i <= SLA_ROUND_TOTAL; i++) {
+        for (let i = 1; i <= roundTotal; i++) {
           const speed = ifArea.querySelector(`.step-table-speed-${i}`)?.textContent?.trim() || '';
           const slaRef = ifArea.querySelector(`.step-table-default-${i}`)?.textContent?.trim() || '';
           const resultText = ifArea.querySelector(`.step-table-result-${i}`)?.textContent?.trim() || '';
@@ -826,7 +819,7 @@ export class KTProvider {
           totalCount: totalMatch ? parseInt(totalMatch[1]) : 0,
           fullText: fullText.slice(0, 500),
         };
-      });
+      }, SLA_ROUND_TOTAL);
 
       if (!parsed) {
         result.error = 'ifArea 엘리먼트를 찾지 못했습니다';
