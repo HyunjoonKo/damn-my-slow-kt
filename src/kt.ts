@@ -251,6 +251,7 @@ export class KTProvider {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
   private page: Page | null = null;
+  private startedSpeedClient = false;
 
   constructor(config: Config) {
     this.config = config;
@@ -284,51 +285,60 @@ export class KTProvider {
 
     await this.ensureWindowsSpeedClientRunning();
 
-    if (process.platform === 'win32') {
-      try {
-        this.browser = await chromium.launch({ ...launchOptions, channel: 'chrome' });
-      } catch (e: unknown) {
-        const err = e instanceof Error ? e : new Error(String(e));
-        if (!isChromeChannelMissingError(err)) {
-          throw err;
+    try {
+      if (process.platform === 'win32') {
+        try {
+          this.browser = await chromium.launch({ ...launchOptions, channel: 'chrome' });
+        } catch (e: unknown) {
+          const err = e instanceof Error ? e : new Error(String(e));
+          if (!isChromeChannelMissingError(err)) {
+            throw err;
+          }
+          console.warn(chalk.yellow(`⚠ 시스템 Chrome을 찾지 못해 Playwright Chromium으로 재시도합니다: ${err.message.split('\n')[0]}`));
         }
-        console.warn(chalk.yellow(`⚠ 시스템 Chrome을 찾지 못해 Playwright Chromium으로 재시도합니다: ${err.message.split('\n')[0]}`));
       }
-    }
 
-    if (!this.browser) {
-      // Playwright 브라우저 바이너리가 없으면 자동 설치 (npx 첫 실행 시 필요)
-      try {
-        this.browser = await chromium.launch(launchOptions);
-      } catch (e: unknown) {
-        const err = e instanceof Error ? e : new Error(String(e));
-        if (err.message.includes("Executable doesn't exist")) {
-          console.log('📦 Chromium 브라우저 설치 중... (최초 1회)');
-          execSync('npx playwright install chromium', { stdio: 'inherit' });
+      if (!this.browser) {
+        // Playwright 브라우저 바이너리가 없으면 자동 설치 (npx 첫 실행 시 필요)
+        try {
           this.browser = await chromium.launch(launchOptions);
-        } else {
-          throw e;
+        } catch (e: unknown) {
+          const err = e instanceof Error ? e : new Error(String(e));
+          if (err.message.includes("Executable doesn't exist")) {
+            console.log('📦 Chromium 브라우저 설치 중... (최초 1회)');
+            execSync('npx playwright install chromium', { stdio: 'inherit' });
+            this.browser = await chromium.launch(launchOptions);
+          } else {
+            throw e;
+          }
         }
       }
-    }
 
-    this.context = await this.browser.newContext({
-      // Windows의 KT 측정 프로그램 탐지는 브라우저 정보에 민감해서 실제 Chrome UA를 그대로 둔다.
-      ...(process.platform === 'win32' ? {} : { userAgent: DEFAULT_BROWSER_USER_AGENT }),
-      viewport: { width: 1280, height: 900 },
-    });
+      this.context = await this.browser.newContext({
+        // Windows의 KT 측정 프로그램 탐지는 브라우저 정보에 민감해서 실제 Chrome UA를 그대로 둔다.
+        ...(process.platform === 'win32' ? {} : { userAgent: DEFAULT_BROWSER_USER_AGENT }),
+        viewport: { width: 1280, height: 900 },
+      });
 
-    if (process.platform === 'win32') {
-      try {
-        await this.context.grantPermissions(['local-network-access'], {
-          origin: KT_SPEED_ORIGIN,
-        });
-      } catch (e: unknown) {
-        const err = e instanceof Error ? e : new Error(String(e));
-        console.warn(
-          chalk.yellow(`⚠ local-network-access 권한 부여 실패, 권한 없이 계속 진행합니다: ${err.message.split('\n')[0]}`),
-        );
+      if (process.platform === 'win32') {
+        try {
+          await this.context.grantPermissions(['local-network-access'], {
+            origin: KT_SPEED_ORIGIN,
+          });
+        } catch (e: unknown) {
+          const err = e instanceof Error ? e : new Error(String(e));
+          console.warn(
+            chalk.yellow(`⚠ local-network-access 권한 부여 실패, 권한 없이 계속 진행합니다: ${err.message.split('\n')[0]}`),
+          );
+        }
       }
+    } catch (e: unknown) {
+      await this.context?.close();
+      await this.browser?.close();
+      await this.stopWindowsSpeedClientIfStarted();
+      this.browser = null;
+      this.context = null;
+      throw e;
     }
 
     try {
@@ -409,6 +419,7 @@ export class KTProvider {
     } finally {
       await this.context?.close();
       await this.browser?.close();
+      await this.stopWindowsSpeedClientIfStarted();
       this.browser = null;
       this.context = null;
       this.page = null;
@@ -432,6 +443,7 @@ export class KTProvider {
     }
 
     info('KTSpeedClient 로컬 서버가 없어 실행합니다...');
+    this.startedSpeedClient = true;
     const child = spawn(clientPath, {
       detached: true,
       stdio: 'ignore',
@@ -448,6 +460,37 @@ export class KTProvider {
     }
 
     console.warn(chalk.yellow('⚠ KTSpeedClient를 실행했지만 로컬 서버가 열리지 않았습니다. KT 페이지에서 설치 안내가 표시될 수 있습니다.'));
+  }
+
+  private async stopWindowsSpeedClientIfStarted(): Promise<void> {
+    if (process.platform !== 'win32' || !this.startedSpeedClient) return;
+
+    this.startedSpeedClient = false;
+
+    try {
+      const commands = [
+        "Get-Process -Name 'kt-speed-client' -ErrorAction SilentlyContinue | Stop-Process -Force",
+        `Get-NetTCPConnection -LocalPort ${KT_SPEED_CLIENT_PORT} -ErrorAction SilentlyContinue | ` +
+          'ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }',
+      ];
+
+      execSync(`powershell.exe -NoProfile -Command "${commands.join('; ')}"`, {
+        stdio: 'ignore',
+      });
+
+      for (let i = 0; i < 5; i++) {
+        if (!(await canConnectToLocalPort(KT_SPEED_CLIENT_PORT, 500))) {
+          info('KTSpeedClient 로컬 서버 종료 확인');
+          return;
+        }
+        await sleep(500);
+      }
+
+      console.warn(chalk.yellow('⚠ KTSpeedClient 종료 후에도 로컬 서버 포트가 열려 있습니다.'));
+    } catch (e: unknown) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      console.warn(chalk.yellow(`⚠ KTSpeedClient 종료 실패: ${err.message.split('\n')[0]}`));
+    }
   }
 
   /**
