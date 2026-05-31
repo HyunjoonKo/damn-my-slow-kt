@@ -43,14 +43,16 @@ src/
 ├── scheduler.ts   # OS scheduler install/remove (launchd/systemd/cron)
 └── updater.ts     # npm registry version check with 24h cache
 tests/
-├── config.test.ts # Unit tests for config defaults
+├── config.test.ts     # Unit tests for config defaults
+├── db.test.ts         # SpeedDatabase timezone-aware record tests
+├── kt-parser.test.ts  # SLA result parser unit tests (parseMbpsValue, summarizeSlaResults)
 ```
 
 > Run `tree -I node_modules -I dist` to see the full directory structure.
 
 ### Key Files Explained
 - **kt.ts** (~1,000 lines): The core business logic. Drives Playwright through KT's SLA test flow. Do NOT modify the browser automation selectors without verifying against the live site
-- **cli.ts** (~780 lines): All Commander commands. `run` validates required config fields (credentials + phone) via `validateRequiredFields()` before execution. `init --force` pre-fills prompts with existing config values
+- **cli.ts** (~1,000 lines): All Commander commands. `run` validates required config fields (credentials + phone) via `validateRequiredFields()` before execution. `init --force` pre-fills prompts with existing config values
 - **config.ts** (~200 lines): YAML config load/save, interfaces, defaults, `validateRequiredFields()` for required field validation
 - **scheduler.ts** (~560 lines): Generates multiple launchd/systemd/cron triggers per day based on `max_attempts` and `retry_interval_minutes`
 - **db.ts**: Dual storage backend — tries `node:sqlite` first, falls back to JSON file. Both implement the same interface methods
