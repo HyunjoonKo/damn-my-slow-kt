@@ -36,7 +36,12 @@ import {
   printDockerInstallGuide,
 } from "./docker";
 import { SpeedDatabase } from "./db";
-import { KTProvider, SpeedTestResult } from "./kt";
+import {
+  KTProvider,
+  KT_SLA_GUARANTEE_RATIO,
+  parseMbpsValue,
+  SpeedTestResult,
+} from "./kt";
 import { sendNotifications } from "./notify";
 import { printHistory, printStats } from "./report";
 import { installSchedule, removeSchedule, getPlatform } from "./scheduler";
@@ -775,6 +780,95 @@ function speedBar(mbps: number, maxMbps: number, width = 30): string {
   return `${bar} ${chalk.bold(`${mbps.toFixed(1)}`)} Mbps ${chalk.dim(`(${pct})`)}`;
 }
 
+function getNumberValue(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function inferPlanSpeedFromSlaReference(slaRefMbps: number): number {
+  return slaRefMbps / KT_SLA_GUARANTEE_RATIO;
+}
+
+function inferContractSpeedFromRawData(rawData: string | undefined): number | null {
+  if (!rawData) return null;
+
+  try {
+    const parsed = JSON.parse(rawData) as {
+      inferred_plan_mbps?: unknown;
+      sla_ref_mbps?: unknown;
+      rounds?: Array<{ slaRef?: unknown }>;
+    };
+
+    const inferredPlan = getNumberValue(parsed.inferred_plan_mbps);
+    if (inferredPlan !== null) return inferredPlan;
+
+    const slaRef = getNumberValue(parsed.sla_ref_mbps);
+    if (slaRef !== null) return inferPlanSpeedFromSlaReference(slaRef);
+
+    const roundRefs =
+      parsed.rounds
+        ?.map((round) =>
+          typeof round.slaRef === 'string'
+            ? parseMbpsValue(round.slaRef)
+            : null,
+        )
+        .filter((value): value is number => value !== null && Number.isFinite(value) && value > 0) || [];
+
+    return roundRefs.length > 0
+      ? inferPlanSpeedFromSlaReference(Math.max(...roundRefs))
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function displayWidth(text: string): number {
+  const plain = text.replace(/\u001b\[[0-9;]*m/g, '');
+
+  return Array.from(plain).reduce((width, char) => {
+    const code = char.codePointAt(0) ?? 0;
+    const isWide =
+      (code >= 0x1100 && code <= 0x115f) ||
+      (code >= 0x2329 && code <= 0x232a) ||
+      (code >= 0x2e80 && code <= 0xa4cf) ||
+      (code >= 0xac00 && code <= 0xd7a3) ||
+      (code >= 0xf900 && code <= 0xfaff) ||
+      (code >= 0xfe10 && code <= 0xfe19) ||
+      (code >= 0xfe30 && code <= 0xfe6f) ||
+      (code >= 0x2600 && code <= 0x27bf) ||
+      (code >= 0x1f300 && code <= 0x1faff) ||
+      (code >= 0xff00 && code <= 0xff60) ||
+      (code >= 0xffe0 && code <= 0xffe6);
+
+    return width + (isWide ? 2 : 1);
+  }, 0);
+}
+
+function truncateDisplay(text: string, maxWidth: number): string {
+  if (displayWidth(text) <= maxWidth) return text;
+
+  const ellipsis = '...';
+  const targetWidth = Math.max(0, maxWidth - displayWidth(ellipsis));
+  let result = '';
+  let width = 0;
+
+  for (const char of Array.from(text)) {
+    const nextWidth = displayWidth(char);
+    if (width + nextWidth > targetWidth) break;
+    result += char;
+    width += nextWidth;
+  }
+
+  return `${result}${ellipsis}`;
+}
+
+function padBoxContent(text: string, width: number): string {
+  return text + ' '.repeat(Math.max(0, width - displayWidth(text)));
+}
+
+function boxLine(content: string, width: number, color: typeof chalk.green): string {
+  return color("  │") + padBoxContent(content, width) + color("│");
+}
+
 function printRunResult(
   record: {
     sla_result: string;
@@ -783,66 +877,50 @@ function printRunResult(
     ping_ms: number;
     complaint_filed: boolean;
     complaint_result: string;
+    raw_data?: string;
+    error?: string;
   },
   contractSpeed = 1000,
 ): void {
   const isFail = record.sla_result === "fail";
   const isPass = record.sla_result === "pass";
+  const displayContractSpeed =
+    inferContractSpeedFromRawData(record.raw_data) || contractSpeed;
 
   // 상단 구분선
   const headerColor = isFail ? chalk.red : isPass ? chalk.green : chalk.yellow;
   const headerIcon = isFail ? "❌" : isPass ? "✅" : "⚠️";
   const headerText = isFail ? "SLA 미달" : isPass ? "SLA 통과" : "SLA 불명";
+  const headerLine = `  ${headerIcon}  ${chalk.bold(headerText)}`;
+  const bodyLine = record.error
+    ? chalk.yellow(truncateDisplay(`  ⚠ ${record.error}`, 80))
+    : `  ⬇ 다운로드  ${speedBar(record.download_mbps, displayContractSpeed, 20)}`;
+  const boxWidth = Math.max(46, displayWidth(headerLine), displayWidth(bodyLine));
 
   console.log("");
-  console.log(headerColor(`  ┌${"─".repeat(46)}┐`));
-  console.log(
-    headerColor(`  │`) +
-      `  ${headerIcon}  ${chalk.bold(headerText)}` +
-      " ".repeat(46 - headerText.length * 2 - 6) +
-      headerColor("│"),
-  );
-  console.log(headerColor(`  ├${"─".repeat(46)}┤`));
+  console.log(headerColor(`  ┌${"─".repeat(boxWidth)}┐`));
+  console.log(boxLine(headerLine, boxWidth, headerColor));
+  console.log(headerColor(`  ├${"─".repeat(boxWidth)}┤`));
 
-  // 속도 게이지
-  console.log(
-    headerColor("  │") +
-      `  ⬇ 다운로드  ${speedBar(record.download_mbps, contractSpeed, 20)}` +
-      headerColor("  │"),
-  );
+  console.log(boxLine(bodyLine, boxWidth, headerColor));
 
   // 이의신청 결과
   if (
     record.complaint_filed ||
     (isFail && record.complaint_result === "skipped")
   ) {
-    console.log(headerColor(`  ├${"─".repeat(46)}┤`));
+    console.log(headerColor(`  ├${"─".repeat(boxWidth)}┤`));
 
     if (record.complaint_result === "success") {
-      console.log(
-        headerColor("  │") +
-          chalk.green("  🎉 감면 신청 성공!") +
-          " ".repeat(27) +
-          headerColor("│"),
-      );
+      console.log(boxLine(chalk.green("  🎉 감면 신청 성공!"), boxWidth, headerColor));
     } else if (record.complaint_result === "failed") {
-      console.log(
-        headerColor("  │") +
-          chalk.red("  ⚠️  감면 신청 실패") +
-          " ".repeat(27) +
-          headerColor("│"),
-      );
+      console.log(boxLine(chalk.red("  ⚠️  감면 신청 실패"), boxWidth, headerColor));
     } else if (record.complaint_result === "skipped") {
-      console.log(
-        headerColor("  │") +
-          chalk.dim("  📋 감면 신청 생략 (dry-run)") +
-          " ".repeat(19) +
-          headerColor("│"),
-      );
+      console.log(boxLine(chalk.dim("  📋 감면 신청 생략 (dry-run)"), boxWidth, headerColor));
     }
   }
 
-  console.log(headerColor(`  └${"─".repeat(46)}┘`));
+  console.log(headerColor(`  └${"─".repeat(boxWidth)}┘`));
 }
 
 // ─── KT 속도측정 프로그램 설치 안내 ────────────────────────────────

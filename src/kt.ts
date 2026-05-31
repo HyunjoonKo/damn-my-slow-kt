@@ -17,13 +17,28 @@
  */
 
 import { Browser, BrowserContext, Page, chromium } from 'playwright';
-import { execSync } from 'child_process';
+import { execSync, spawn } from 'child_process';
 import fs from 'fs';
+import net from 'net';
 import path from 'path';
 import { Config, DATA_DIR } from './config';
 import chalk from 'chalk';
 
 const KT_SLA_INTRO_URL = 'https://speed.kt.com/sla/slatest/introduce.asp';
+const KT_SPEED_ORIGIN = 'https://speed.kt.com';
+const DEFAULT_BROWSER_USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' +
+  'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+  'Chrome/123.0.0.0 Safari/537.36';
+const SLA_ROUND_TOTAL = 5;
+const SLA_FAIL_THRESHOLD = Math.ceil(SLA_ROUND_TOTAL / 2);
+export const KT_SLA_GUARANTEE_RATIO = 0.5;
+const WORKFLOW_STEP_TOTAL = 5;
+const KT_SPEED_CLIENT_PORT = 10055;
+const KT_SPEED_CLIENT_PATHS = [
+  path.join(process.env['ProgramFiles(x86)'] || '', 'KTSpeedClient', 'kt-speed-client.exe'),
+  path.join(process.env.ProgramFiles || '', 'KTSpeedClient', 'kt-speed-client.exe'),
+].filter((candidate) => path.isAbsolute(candidate));
 // TEST_TIMEOUT_MIN 환경변수로 타임아웃 조절 가능 (기본 40분)
 const SLA_TEST_TIMEOUT_MS = (parseInt(process.env.TEST_TIMEOUT_MIN || '0') || 40) * 60 * 1000;
 const POLL_INTERVAL_MS = 15 * 1000; // 15초 — 라운드 변화를 빠르게 감지
@@ -31,11 +46,11 @@ const POLL_INTERVAL_MS = 15 * 1000; // 15초 — 라운드 변화를 빠르게 �
 // ─── 진행 UI 헬퍼 ────────────────────────────────────────────────
 
 const STEPS = {
-  login:   { num: 1, total: 5, label: '로그인' },
-  layer:   { num: 2, total: 5, label: 'SLA 테스트 준비' },
-  measure: { num: 3, total: 5, label: '속도 측정' },
-  parse:   { num: 4, total: 5, label: '결과 분석' },
-  action:  { num: 5, total: 5, label: '감면 처리' },
+  login:   { num: 1, total: WORKFLOW_STEP_TOTAL, label: '로그인' },
+  layer:   { num: 2, total: WORKFLOW_STEP_TOTAL, label: 'SLA 테스트 준비' },
+  measure: { num: 3, total: WORKFLOW_STEP_TOTAL, label: '속도 측정' },
+  parse:   { num: 4, total: WORKFLOW_STEP_TOTAL, label: '결과 분석' },
+  action:  { num: 5, total: WORKFLOW_STEP_TOTAL, label: '감면 처리' },
 };
 
 function stepHeader(step: { num: number; total: number; label: string }): void {
@@ -59,11 +74,12 @@ function measureProgress(round: number, total: number, elapsedMs: number): void 
   const empty = total - round;
   const bar = chalk.green('■'.repeat(filled)) + chalk.gray('□'.repeat(empty));
   const elapsed = formatElapsed(elapsedMs);
+  const line = `       ${bar}  ${round}/${total}회 완료  ${chalk.dim(elapsed)}  `;
   // 커서를 줄 앞으로 이동하여 같은 줄에 덮어쓰기
   if (process.stdout.isTTY) {
-    process.stdout.write(`\r       ${bar}  ${round}/${total}회 완료  ${chalk.dim(elapsed)}  `);
+    process.stdout.write(`\r${line}\x1b[K`);
   } else {
-    console.log(`       ${bar}  ${round}/${total}회 완료  ${elapsed}`);
+    console.log(line);
   }
 }
 
@@ -76,6 +92,154 @@ export interface SpeedTestResult {
   complaint_result: 'success' | 'failed' | 'skipped' | 'not_applicable';
   raw_data: Record<string, unknown>;
   error: string;
+}
+
+export interface ParsedSlaRound {
+  speed: string;
+  slaRef: string;
+  result: string;
+  date: string;
+}
+
+export interface ParsedSlaResults {
+  rounds: ParsedSlaRound[];
+  satisfyCount: number;
+  failCount: number;
+  totalCount: number;
+  fullText: string;
+}
+
+interface SlaDomParseOptions {
+  roundTotal: number;
+  includeEmptyRounds: boolean;
+  fullTextLimit: number;
+}
+
+interface ParsedSlaDomResults extends ParsedSlaResults {
+  completedRounds: number;
+  isMeasuring: boolean;
+  countdown: string;
+  textSnippet: string;
+}
+
+export interface SlaResultSummary {
+  downloadMbps: number;
+  slaResult: SpeedTestResult['sla_result'];
+  rawData: Record<string, unknown>;
+  error: string;
+}
+
+function parseSlaDomResults(options: SlaDomParseOptions): ParsedSlaDomResults | null {
+  const ifArea = document.getElementById('ifArea');
+  if (!ifArea) return null;
+
+  const rounds: ParsedSlaRound[] = [];
+  let completedRounds = 0;
+  for (let i = 1; i <= options.roundTotal; i++) {
+    const speed = ifArea.querySelector(`.step-table-speed-${i}`)?.textContent?.trim() || '';
+    const slaRef = ifArea.querySelector(`.step-table-default-${i}`)?.textContent?.trim() || '';
+    const resultText = ifArea.querySelector(`.step-table-result-${i}`)?.textContent?.trim() || '';
+    const date = ifArea.querySelector(`.step-table-date-${i}`)?.textContent?.trim() || '';
+
+    if (speed) completedRounds += 1;
+    if (speed || options.includeEmptyRounds) {
+      rounds.push({ speed, slaRef, result: resultText, date });
+    }
+  }
+
+  const fullText = ifArea.textContent?.replace(/\s+/g, ' ').trim() || '';
+  const satisfyMatch = fullText.match(/SLA만족\s*횟수는?\s*(\d+)\s*번/);
+  const failMatch = fullText.match(/미달\s*횟수는?\s*(\d+)\s*번/);
+  const totalMatch = fullText.match(/테스트\s*횟수\s*(\d+)\s*번/);
+
+  return {
+    rounds,
+    completedRounds,
+    isMeasuring: fullText.includes('측정중'),
+    countdown: ifArea.querySelector('.delayTimeSec')?.textContent?.trim() || '',
+    satisfyCount: satisfyMatch ? parseInt(satisfyMatch[1]) : 0,
+    failCount: failMatch ? parseInt(failMatch[1]) : 0,
+    totalCount: totalMatch ? parseInt(totalMatch[1]) : 0,
+    fullText: fullText.slice(0, options.fullTextLimit),
+    textSnippet: fullText.slice(0, 200),
+  };
+}
+
+export function parseMbpsValue(text: string): number | null {
+  const match = text.replace(/,/g, '').match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+
+  const value = Number(match[0]);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+export function summarizeSlaResults(parsed: ParsedSlaResults): SlaResultSummary {
+  const speeds = parsed.rounds
+    .map((round) => parseMbpsValue(round.speed))
+    .filter((value): value is number => value !== null);
+  const slaRefs = parsed.rounds
+    .map((round) => parseMbpsValue(round.slaRef))
+    .filter((value): value is number => value !== null);
+  const slaReferenceMbps = slaRefs.length > 0 ? Math.max(...slaRefs) : null;
+  const inferredPlanMbps = slaReferenceMbps !== null ? slaReferenceMbps / KT_SLA_GUARANTEE_RATIO : null;
+
+  const rawData = {
+    total: parsed.totalCount,
+    satisfy: parsed.satisfyCount,
+    fail: parsed.failCount,
+    rounds: parsed.rounds,
+    parsed_speed_count: speeds.length,
+    sla_ref_mbps: slaReferenceMbps,
+    inferred_plan_mbps: inferredPlanMbps,
+  };
+
+  if (speeds.length === 0) {
+    const error =
+      parsed.totalCount > 0
+        ? '측정 요약은 확인됐지만 회차별 다운로드 속도를 읽지 못했습니다. KT 측정 프로그램 결과 전달 상태를 확인하세요.'
+        : '측정 결과 영역에서 회차별 다운로드 속도와 요약 정보를 읽지 못했습니다. KT 측정 프로그램 결과 전달 상태를 확인하세요.';
+
+    return {
+      downloadMbps: 0,
+      slaResult: 'unknown',
+      rawData,
+      error,
+    };
+  }
+
+  if (parsed.totalCount > 0 && parsed.totalCount < SLA_ROUND_TOTAL) {
+    return {
+      downloadMbps: speeds.reduce((a, b) => a + b, 0) / speeds.length,
+      slaResult: 'unknown',
+      rawData,
+      error: `SLA 측정이 ${parsed.totalCount}/${SLA_ROUND_TOTAL}회만 기록되어 완료되지 않았습니다.`,
+    };
+  }
+
+  const downloadMbps = speeds.reduce((a, b) => a + b, 0) / speeds.length;
+
+  let slaResult: SpeedTestResult['sla_result'] = 'unknown';
+  if (parsed.totalCount > 0) {
+    slaResult = parsed.failCount >= SLA_FAIL_THRESHOLD ? 'fail' : 'pass';
+  } else {
+    const fallbackFailMatch = parsed.fullText.match(/미달\s*횟수는?\s*(\d+)\s*번/);
+    const fallbackSatisfyMatch = parsed.fullText.match(/SLA\s*만족\s*횟수는?\s*(\d+)\s*번/);
+    const fallbackFailCount = fallbackFailMatch ? Number(fallbackFailMatch[1]) : null;
+    const fallbackSatisfyCount = fallbackSatisfyMatch ? Number(fallbackSatisfyMatch[1]) : null;
+
+    if (fallbackFailCount !== null && fallbackFailCount >= SLA_FAIL_THRESHOLD) {
+      slaResult = 'fail';
+    } else if (fallbackSatisfyCount !== null && fallbackSatisfyCount >= SLA_FAIL_THRESHOLD) {
+      slaResult = 'pass';
+    }
+  }
+
+  return {
+    downloadMbps,
+    slaResult,
+    rawData,
+    error: '',
+  };
 }
 
 /**
@@ -105,11 +269,47 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isChromeChannelMissingError(err: Error): boolean {
+  const message = err.message.toLowerCase();
+
+  return (
+    message.includes("executable doesn't exist") ||
+    message.includes("chromium distribution 'chrome' is not found") ||
+    message.includes('chrome is not installed') ||
+    message.includes('chrome not installed') ||
+    (message.includes("channel 'chrome'") && message.includes('not found'))
+  );
+}
+
+function canConnectToLocalPort(port: number, timeoutMs = 1000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host: '127.0.0.1', port });
+    let settled = false;
+
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(ok);
+    };
+
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+  });
+}
+
+function findWindowsSpeedClientPath(): string | null {
+  return KT_SPEED_CLIENT_PATHS.find((candidate) => fs.existsSync(candidate)) || null;
+}
+
 export class KTProvider {
   private config: Config;
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
   private page: Page | null = null;
+  private startedSpeedClient = false;
 
   constructor(config: Config) {
     this.config = config;
@@ -141,27 +341,63 @@ export class KTProvider {
       ],
     };
 
-    // Playwright 브라우저 바이너리가 없으면 자동 설치 (npx 첫 실행 시 필요)
-    try {
-      this.browser = await chromium.launch(launchOptions);
-    } catch (e: unknown) {
-      const err = e instanceof Error ? e : new Error(String(e));
-      if (err.message.includes("Executable doesn't exist")) {
-        console.log('📦 Chromium 브라우저 설치 중... (최초 1회)');
-        execSync('npx playwright install chromium', { stdio: 'inherit' });
-        this.browser = await chromium.launch(launchOptions);
-      } else {
-        throw e;
-      }
-    }
+    await this.ensureWindowsSpeedClientRunning();
 
-    this.context = await this.browser.newContext({
-      userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' +
-        'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-        'Chrome/123.0.0.0 Safari/537.36',
-      viewport: { width: 1280, height: 900 },
-    });
+    try {
+      if (process.platform === 'win32') {
+        try {
+          this.browser = await chromium.launch({ ...launchOptions, channel: 'chrome' });
+        } catch (e: unknown) {
+          const err = e instanceof Error ? e : new Error(String(e));
+          if (!isChromeChannelMissingError(err)) {
+            throw err;
+          }
+          console.warn(chalk.yellow(`⚠ 시스템 Chrome을 찾지 못해 Playwright Chromium으로 재시도합니다: ${err.message.split('\n')[0]}`));
+        }
+      }
+
+      if (!this.browser) {
+        // Playwright 브라우저 바이너리가 없으면 자동 설치 (npx 첫 실행 시 필요)
+        try {
+          this.browser = await chromium.launch(launchOptions);
+        } catch (e: unknown) {
+          const err = e instanceof Error ? e : new Error(String(e));
+          if (err.message.includes("Executable doesn't exist")) {
+            console.log('📦 Chromium 브라우저 설치 중... (최초 1회)');
+            execSync('npx playwright install chromium', { stdio: 'inherit' });
+            this.browser = await chromium.launch(launchOptions);
+          } else {
+            throw e;
+          }
+        }
+      }
+
+      this.context = await this.browser.newContext({
+        // Windows의 KT 측정 프로그램 탐지는 브라우저 정보에 민감해서 실제 Chrome UA를 그대로 둔다.
+        ...(process.platform === 'win32' ? {} : { userAgent: DEFAULT_BROWSER_USER_AGENT }),
+        viewport: { width: 1280, height: 900 },
+      });
+
+      if (process.platform === 'win32') {
+        try {
+          await this.context.grantPermissions(['local-network-access'], {
+            origin: KT_SPEED_ORIGIN,
+          });
+        } catch (e: unknown) {
+          const err = e instanceof Error ? e : new Error(String(e));
+          console.warn(
+            chalk.yellow(`⚠ local-network-access 권한 부여 실패, 권한 없이 계속 진행합니다: ${err.message.split('\n')[0]}`),
+          );
+        }
+      }
+    } catch (e: unknown) {
+      await this.context?.close();
+      await this.browser?.close();
+      await this.stopWindowsSpeedClientIfStarted();
+      this.browser = null;
+      this.context = null;
+      throw e;
+    }
 
     try {
       this.page = await this.context.newPage();
@@ -191,7 +427,7 @@ export class KTProvider {
 
       // Step 3: 속도 측정
       stepHeader(STEPS.measure);
-      info('5회 측정 시작 (약 25분 소요)');
+      info(`${SLA_ROUND_TOTAL}회 측정 시작 (약 25분 소요)`);
       await this.startMeasurement();
       await this.waitForCompletion();
 
@@ -241,12 +477,78 @@ export class KTProvider {
     } finally {
       await this.context?.close();
       await this.browser?.close();
+      await this.stopWindowsSpeedClientIfStarted();
       this.browser = null;
       this.context = null;
       this.page = null;
     }
 
     return result;
+  }
+
+  private async ensureWindowsSpeedClientRunning(): Promise<void> {
+    if (process.platform !== 'win32') return;
+
+    if (await canConnectToLocalPort(KT_SPEED_CLIENT_PORT)) {
+      info('KTSpeedClient 로컬 서버 확인됨');
+      return;
+    }
+
+    const clientPath = findWindowsSpeedClientPath();
+    if (!clientPath) {
+      console.warn(chalk.yellow('⚠ KTSpeedClient 실행 파일을 찾지 못했습니다. KT 페이지에서 설치 안내가 표시될 수 있습니다.'));
+      return;
+    }
+
+    info('KTSpeedClient 로컬 서버가 없어 실행합니다...');
+    this.startedSpeedClient = true;
+    const child = spawn(clientPath, {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    child.unref();
+
+    for (let i = 0; i < 10; i++) {
+      await sleep(1000);
+      if (await canConnectToLocalPort(KT_SPEED_CLIENT_PORT)) {
+        info('KTSpeedClient 로컬 서버 시작 확인');
+        return;
+      }
+    }
+
+    console.warn(chalk.yellow('⚠ KTSpeedClient를 실행했지만 로컬 서버가 열리지 않았습니다. KT 페이지에서 설치 안내가 표시될 수 있습니다.'));
+  }
+
+  private async stopWindowsSpeedClientIfStarted(): Promise<void> {
+    if (process.platform !== 'win32' || !this.startedSpeedClient) return;
+
+    this.startedSpeedClient = false;
+
+    try {
+      const commands = [
+        "Get-Process -Name 'kt-speed-client' -ErrorAction SilentlyContinue | Stop-Process -Force",
+        `Get-NetTCPConnection -LocalPort ${KT_SPEED_CLIENT_PORT} -ErrorAction SilentlyContinue | ` +
+          'ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }',
+      ];
+
+      execSync(`powershell.exe -NoProfile -Command "${commands.join('; ')}"`, {
+        stdio: 'ignore',
+      });
+
+      for (let i = 0; i < 5; i++) {
+        if (!(await canConnectToLocalPort(KT_SPEED_CLIENT_PORT, 500))) {
+          info('KTSpeedClient 로컬 서버 종료 확인');
+          return;
+        }
+        await sleep(500);
+      }
+
+      console.warn(chalk.yellow('⚠ KTSpeedClient 종료 후에도 로컬 서버 포트가 열려 있습니다.'));
+    } catch (e: unknown) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      console.warn(chalk.yellow(`⚠ KTSpeedClient 종료 실패: ${err.message.split('\n')[0]}`));
+    }
   }
 
   /**
@@ -563,34 +865,10 @@ export class KTProvider {
       elapsed += POLL_INTERVAL_MS;
 
       // 구조화된 CSS 클래스로 회차별 결과를 직접 파싱
-      const status = await page.evaluate(() => {
-        const ifArea = document.getElementById('ifArea');
-        if (!ifArea) return null;
-
-        // 회차별 상세 결과
-        const rounds: Array<{ speed: string; slaRef: string; result: string; date: string }> = [];
-        for (let i = 1; i <= 5; i++) {
-          const speed = ifArea.querySelector(`.step-table-speed-${i}`)?.textContent?.trim() || '';
-          const slaRef = ifArea.querySelector(`.step-table-default-${i}`)?.textContent?.trim() || '';
-          const resultText = ifArea.querySelector(`.step-table-result-${i}`)?.textContent?.trim() || '';
-          const date = ifArea.querySelector(`.step-table-date-${i}`)?.textContent?.trim() || '';
-          rounds.push({ speed, slaRef, result: resultText, date });
-        }
-
-        const completedRounds = rounds.filter(r => r.speed).length;
-
-        // "측정중" 상태 확인
-        const fullText = ifArea.textContent?.replace(/\s+/g, ' ').trim() || '';
-        const isMeasuring = fullText.includes('측정중');
-
-        // 카운트다운 타이머
-        const countdown = ifArea.querySelector('.delayTimeSec')?.textContent?.trim() || '';
-
-        // 결과 요약 텍스트
-        const totalMatch = fullText.match(/테스트\s*횟수\s*(\d+)\s*번/);
-        const totalCount = totalMatch ? parseInt(totalMatch[1]) : 0;
-
-        return { rounds, completedRounds, isMeasuring, countdown, totalCount, textSnippet: fullText.slice(0, 200) };
+      const status = await page.evaluate(parseSlaDomResults, {
+        roundTotal: SLA_ROUND_TOTAL,
+        includeEmptyRounds: true,
+        fullTextLimit: 500,
       });
 
       if (!status) continue;
@@ -606,7 +884,7 @@ export class KTProvider {
           const r = status.rounds[i];
           const isFail = r.result.includes('미달');
           const icon = isFail ? '❌' : '✅';
-          if (process.stdout.isTTY) console.log(''); // 진행 바 줄바꿈
+          if (process.stdout.isTTY) process.stdout.write('\n'); // 진행 바 줄바꿈
           info(`${icon} ${i + 1}회차: ${r.speed} (기준 ${r.slaRef}) → ${r.result}  [${r.date}]`);
         }
         lastReportedRound = status.completedRounds;
@@ -615,21 +893,19 @@ export class KTProvider {
         await this.saveHtmlSnapshot(`round-${status.completedRounds}`);
       }
 
-      const roundsDone = status.completedRounds || status.totalCount;
-
       // 완료 조건: 5개 회차의 측정값이 모두 채워짐
       // (페이지가 "측정중" 텍스트를 유지하더라도, 5개 속도값이 있으면 완료)
-      if (status.completedRounds >= 5) {
-        measureProgress(5, 5, elapsed);
+      if (status.completedRounds >= SLA_ROUND_TOTAL) {
+        measureProgress(SLA_ROUND_TOTAL, SLA_ROUND_TOTAL, elapsed);
         if (process.stdout.isTTY) console.log('');
-        info('5회 측정 완료!');
+        info(`${SLA_ROUND_TOTAL}회 측정 완료!`);
         await this.saveHtmlSnapshot('complete');
         break;
-      } else if (roundsDone > 0) {
-        measureProgress(roundsDone, 5, elapsed);
+      } else if (status.completedRounds > 0) {
+        measureProgress(status.completedRounds, SLA_ROUND_TOTAL, elapsed);
         if (status.countdown) {
           if (process.stdout.isTTY) {
-            process.stdout.write(chalk.dim(` 다음: ${status.countdown}`));
+            process.stdout.write(`${chalk.dim(` 다음: ${status.countdown}`)}\x1b[K`);
           }
         }
       }
@@ -655,35 +931,10 @@ export class KTProvider {
 
     try {
       // 구조화된 DOM에서 회차별 데이터를 직접 추출
-      const parsed = await page.evaluate(() => {
-        const ifArea = document.getElementById('ifArea');
-        if (!ifArea) return null;
-
-        // 회차별 결과 파싱 — CSS 클래스 기반
-        const rounds: Array<{ speed: string; slaRef: string; result: string; date: string }> = [];
-        for (let i = 1; i <= 5; i++) {
-          const speed = ifArea.querySelector(`.step-table-speed-${i}`)?.textContent?.trim() || '';
-          const slaRef = ifArea.querySelector(`.step-table-default-${i}`)?.textContent?.trim() || '';
-          const resultText = ifArea.querySelector(`.step-table-result-${i}`)?.textContent?.trim() || '';
-          const date = ifArea.querySelector(`.step-table-date-${i}`)?.textContent?.trim() || '';
-          if (speed) {
-            rounds.push({ speed, slaRef, result: resultText, date });
-          }
-        }
-
-        // 요약 텍스트 (display:none이어도 textContent로 접근 가능)
-        const fullText = ifArea.textContent?.replace(/\s+/g, ' ').trim() || '';
-        const satisfyMatch = fullText.match(/SLA만족\s*횟수는?\s*(\d+)\s*번/);
-        const failMatch = fullText.match(/미달\s*횟수는?\s*(\d+)\s*번/);
-        const totalMatch = fullText.match(/테스트\s*횟수\s*(\d+)\s*번/);
-
-        return {
-          rounds,
-          satisfyCount: satisfyMatch ? parseInt(satisfyMatch[1]) : 0,
-          failCount: failMatch ? parseInt(failMatch[1]) : 0,
-          totalCount: totalMatch ? parseInt(totalMatch[1]) : 0,
-          fullText: fullText.slice(0, 500),
-        };
+      const parsed = await page.evaluate(parseSlaDomResults, {
+        roundTotal: SLA_ROUND_TOTAL,
+        includeEmptyRounds: false,
+        fullTextLimit: 500,
       });
 
       if (!parsed) {
@@ -691,33 +942,21 @@ export class KTProvider {
         return result;
       }
 
-      // 회차별 속도를 평균으로 계산
-      const speeds = parsed.rounds
-        .map((r) => parseFloat(r.speed))
-        .filter((v) => !isNaN(v));
+      // 회차별 속도와 SLA 판정은 같은 기준으로 계산해야 알림/DB가 어긋나지 않는다.
+      const summary = summarizeSlaResults(parsed);
+      result.download_mbps = summary.downloadMbps;
+      result.sla_result = summary.slaResult;
+      result.raw_data = summary.rawData;
+      result.error = summary.error;
 
-      if (speeds.length > 0) {
-        result.download_mbps = speeds.reduce((a, b) => a + b, 0) / speeds.length;
+      if (summary.error) {
+        info(chalk.yellow(summary.error));
       }
 
       // SLA 결과 판정
       const { satisfyCount, failCount, totalCount } = parsed;
       if (totalCount > 0) {
         info(`전체 ${totalCount}회: 만족 ${satisfyCount}회, 미달 ${failCount}회`);
-
-        result.raw_data = {
-          total: totalCount,
-          satisfy: satisfyCount,
-          fail: failCount,
-          rounds: parsed.rounds,
-        };
-
-        // 5회 중 3회 이상 미달이면 SLA fail
-        if (failCount >= 3) {
-          result.sla_result = 'fail';
-        } else {
-          result.sla_result = 'pass';
-        }
       }
 
       // 개별 라운드 결과 출력
@@ -727,14 +966,7 @@ export class KTProvider {
         info(`  ${icon} ${round.speed} (기준: ${round.slaRef}) → ${round.result}`);
       }
 
-      // fallback: 텍스트 기반 판정
-      if (result.sla_result === 'unknown') {
-        if (parsed.fullText.includes('미달') && /[345]번/.test(parsed.fullText)) {
-          result.sla_result = 'fail';
-        } else if (parsed.fullText.includes('만족')) {
-          result.sla_result = 'pass';
-        }
-      }
+      // fallback 판정은 summarizeSlaResults()에서 처리한다.
     } catch (e: unknown) {
       const err = e instanceof Error ? e : new Error(String(e));
       info(chalk.red(`결과 파싱 실패: ${err.message}`));
