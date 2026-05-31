@@ -32,12 +32,13 @@ const DEFAULT_BROWSER_USER_AGENT =
   'Chrome/123.0.0.0 Safari/537.36';
 const SLA_ROUND_TOTAL = 5;
 const SLA_FAIL_THRESHOLD = Math.ceil(SLA_ROUND_TOTAL / 2);
+export const KT_SLA_GUARANTEE_RATIO = 0.5;
 const WORKFLOW_STEP_TOTAL = 5;
 const KT_SPEED_CLIENT_PORT = 10055;
 const KT_SPEED_CLIENT_PATHS = [
   path.join(process.env['ProgramFiles(x86)'] || '', 'KTSpeedClient', 'kt-speed-client.exe'),
   path.join(process.env.ProgramFiles || '', 'KTSpeedClient', 'kt-speed-client.exe'),
-].filter(Boolean);
+].filter((candidate) => path.isAbsolute(candidate));
 // TEST_TIMEOUT_MIN 환경변수로 타임아웃 조절 가능 (기본 40분)
 const SLA_TEST_TIMEOUT_MS = (parseInt(process.env.TEST_TIMEOUT_MIN || '0') || 40) * 60 * 1000;
 const POLL_INTERVAL_MS = 15 * 1000; // 15초 — 라운드 변화를 빠르게 감지
@@ -108,6 +109,19 @@ export interface ParsedSlaResults {
   fullText: string;
 }
 
+interface SlaDomParseOptions {
+  roundTotal: number;
+  includeEmptyRounds: boolean;
+  fullTextLimit: number;
+}
+
+interface ParsedSlaDomResults extends ParsedSlaResults {
+  completedRounds: number;
+  isMeasuring: boolean;
+  countdown: string;
+  textSnippet: string;
+}
+
 export interface SlaResultSummary {
   downloadMbps: number;
   slaResult: SpeedTestResult['sla_result'];
@@ -115,12 +129,48 @@ export interface SlaResultSummary {
   error: string;
 }
 
+function parseSlaDomResults(options: SlaDomParseOptions): ParsedSlaDomResults | null {
+  const ifArea = document.getElementById('ifArea');
+  if (!ifArea) return null;
+
+  const rounds: ParsedSlaRound[] = [];
+  let completedRounds = 0;
+  for (let i = 1; i <= options.roundTotal; i++) {
+    const speed = ifArea.querySelector(`.step-table-speed-${i}`)?.textContent?.trim() || '';
+    const slaRef = ifArea.querySelector(`.step-table-default-${i}`)?.textContent?.trim() || '';
+    const resultText = ifArea.querySelector(`.step-table-result-${i}`)?.textContent?.trim() || '';
+    const date = ifArea.querySelector(`.step-table-date-${i}`)?.textContent?.trim() || '';
+
+    if (speed) completedRounds += 1;
+    if (speed || options.includeEmptyRounds) {
+      rounds.push({ speed, slaRef, result: resultText, date });
+    }
+  }
+
+  const fullText = ifArea.textContent?.replace(/\s+/g, ' ').trim() || '';
+  const satisfyMatch = fullText.match(/SLA만족\s*횟수는?\s*(\d+)\s*번/);
+  const failMatch = fullText.match(/미달\s*횟수는?\s*(\d+)\s*번/);
+  const totalMatch = fullText.match(/테스트\s*횟수\s*(\d+)\s*번/);
+
+  return {
+    rounds,
+    completedRounds,
+    isMeasuring: fullText.includes('측정중'),
+    countdown: ifArea.querySelector('.delayTimeSec')?.textContent?.trim() || '',
+    satisfyCount: satisfyMatch ? parseInt(satisfyMatch[1]) : 0,
+    failCount: failMatch ? parseInt(failMatch[1]) : 0,
+    totalCount: totalMatch ? parseInt(totalMatch[1]) : 0,
+    fullText: fullText.slice(0, options.fullTextLimit),
+    textSnippet: fullText.slice(0, 200),
+  };
+}
+
 export function parseMbpsValue(text: string): number | null {
   const match = text.replace(/,/g, '').match(/-?\d+(?:\.\d+)?/);
   if (!match) return null;
 
   const value = Number(match[0]);
-  return Number.isFinite(value) ? value : null;
+  return Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 export function summarizeSlaResults(parsed: ParsedSlaResults): SlaResultSummary {
@@ -131,7 +181,7 @@ export function summarizeSlaResults(parsed: ParsedSlaResults): SlaResultSummary 
     .map((round) => parseMbpsValue(round.slaRef))
     .filter((value): value is number => value !== null);
   const slaReferenceMbps = slaRefs.length > 0 ? Math.max(...slaRefs) : null;
-  const inferredPlanMbps = slaReferenceMbps !== null ? slaReferenceMbps * 2 : null;
+  const inferredPlanMbps = slaReferenceMbps !== null ? slaReferenceMbps / KT_SLA_GUARANTEE_RATIO : null;
 
   const rawData = {
     total: parsed.totalCount,
@@ -815,35 +865,11 @@ export class KTProvider {
       elapsed += POLL_INTERVAL_MS;
 
       // 구조화된 CSS 클래스로 회차별 결과를 직접 파싱
-      const status = await page.evaluate((roundTotal) => {
-        const ifArea = document.getElementById('ifArea');
-        if (!ifArea) return null;
-
-        // 회차별 상세 결과
-        const rounds: Array<{ speed: string; slaRef: string; result: string; date: string }> = [];
-        for (let i = 1; i <= roundTotal; i++) {
-          const speed = ifArea.querySelector(`.step-table-speed-${i}`)?.textContent?.trim() || '';
-          const slaRef = ifArea.querySelector(`.step-table-default-${i}`)?.textContent?.trim() || '';
-          const resultText = ifArea.querySelector(`.step-table-result-${i}`)?.textContent?.trim() || '';
-          const date = ifArea.querySelector(`.step-table-date-${i}`)?.textContent?.trim() || '';
-          rounds.push({ speed, slaRef, result: resultText, date });
-        }
-
-        const completedRounds = rounds.filter(r => r.speed).length;
-
-        // "측정중" 상태 확인
-        const fullText = ifArea.textContent?.replace(/\s+/g, ' ').trim() || '';
-        const isMeasuring = fullText.includes('측정중');
-
-        // 카운트다운 타이머
-        const countdown = ifArea.querySelector('.delayTimeSec')?.textContent?.trim() || '';
-
-        // 결과 요약 텍스트
-        const totalMatch = fullText.match(/테스트\s*횟수\s*(\d+)\s*번/);
-        const totalCount = totalMatch ? parseInt(totalMatch[1]) : 0;
-
-        return { rounds, completedRounds, isMeasuring, countdown, totalCount, textSnippet: fullText.slice(0, 200) };
-      }, SLA_ROUND_TOTAL);
+      const status = await page.evaluate(parseSlaDomResults, {
+        roundTotal: SLA_ROUND_TOTAL,
+        includeEmptyRounds: true,
+        fullTextLimit: 500,
+      });
 
       if (!status) continue;
 
@@ -905,36 +931,11 @@ export class KTProvider {
 
     try {
       // 구조화된 DOM에서 회차별 데이터를 직접 추출
-      const parsed = await page.evaluate((roundTotal) => {
-        const ifArea = document.getElementById('ifArea');
-        if (!ifArea) return null;
-
-        // 회차별 결과 파싱 — CSS 클래스 기반
-        const rounds: Array<{ speed: string; slaRef: string; result: string; date: string }> = [];
-        for (let i = 1; i <= roundTotal; i++) {
-          const speed = ifArea.querySelector(`.step-table-speed-${i}`)?.textContent?.trim() || '';
-          const slaRef = ifArea.querySelector(`.step-table-default-${i}`)?.textContent?.trim() || '';
-          const resultText = ifArea.querySelector(`.step-table-result-${i}`)?.textContent?.trim() || '';
-          const date = ifArea.querySelector(`.step-table-date-${i}`)?.textContent?.trim() || '';
-          if (speed) {
-            rounds.push({ speed, slaRef, result: resultText, date });
-          }
-        }
-
-        // 요약 텍스트 (display:none이어도 textContent로 접근 가능)
-        const fullText = ifArea.textContent?.replace(/\s+/g, ' ').trim() || '';
-        const satisfyMatch = fullText.match(/SLA만족\s*횟수는?\s*(\d+)\s*번/);
-        const failMatch = fullText.match(/미달\s*횟수는?\s*(\d+)\s*번/);
-        const totalMatch = fullText.match(/테스트\s*횟수\s*(\d+)\s*번/);
-
-        return {
-          rounds,
-          satisfyCount: satisfyMatch ? parseInt(satisfyMatch[1]) : 0,
-          failCount: failMatch ? parseInt(failMatch[1]) : 0,
-          totalCount: totalMatch ? parseInt(totalMatch[1]) : 0,
-          fullText: fullText.slice(0, 500),
-        };
-      }, SLA_ROUND_TOTAL);
+      const parsed = await page.evaluate(parseSlaDomResults, {
+        roundTotal: SLA_ROUND_TOTAL,
+        includeEmptyRounds: false,
+        fullTextLimit: 500,
+      });
 
       if (!parsed) {
         result.error = 'ifArea 엘리먼트를 찾지 못했습니다';

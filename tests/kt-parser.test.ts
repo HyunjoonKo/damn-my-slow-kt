@@ -15,6 +15,10 @@ describe('parseMbpsValue', () => {
     expect(parseMbpsValue('')).toBeNull();
     expect(parseMbpsValue('측정값 없음')).toBeNull();
   });
+
+  it('rejects negative Mbps values', () => {
+    expect(parseMbpsValue('-5.0 Mbps')).toBeNull();
+  });
 });
 
 describe('summarizeSlaResults', () => {

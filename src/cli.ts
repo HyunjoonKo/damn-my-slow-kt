@@ -36,7 +36,12 @@ import {
   printDockerInstallGuide,
 } from "./docker";
 import { SpeedDatabase } from "./db";
-import { KTProvider, SpeedTestResult } from "./kt";
+import {
+  KTProvider,
+  KT_SLA_GUARANTEE_RATIO,
+  parseMbpsValue,
+  SpeedTestResult,
+} from "./kt";
 import { sendNotifications } from "./notify";
 import { printHistory, printStats } from "./report";
 import { installSchedule, removeSchedule, getPlatform } from "./scheduler";
@@ -45,7 +50,6 @@ import { checkAndRunMigrations, CURRENT_CONFIG_VERSION } from "./migration";
 
 // package.json에서 버전 읽기
 const pkg = require("../package.json") as { version: string; name: string };
-const KT_SLA_GUARANTEE_RATIO = 0.5;
 
 export function buildCli(): Command {
   const program = new Command();
@@ -804,7 +808,7 @@ function inferContractSpeedFromRawData(rawData: string | undefined): number | nu
       parsed.rounds
         ?.map((round) =>
           typeof round.slaRef === 'string'
-            ? Number(round.slaRef.replace(/,/g, '').match(/\d+(?:\.\d+)?/)?.[0])
+            ? parseMbpsValue(round.slaRef)
             : null,
         )
         .filter((value): value is number => value !== null && Number.isFinite(value) && value > 0) || [];
@@ -898,12 +902,7 @@ function printRunResult(
   console.log(boxLine(headerLine, boxWidth, headerColor));
   console.log(headerColor(`  ├${"─".repeat(boxWidth)}┤`));
 
-  if (record.error) {
-    console.log(boxLine(bodyLine, boxWidth, headerColor));
-  } else {
-    // 속도 게이지
-    console.log(boxLine(bodyLine, boxWidth, headerColor));
-  }
+  console.log(boxLine(bodyLine, boxWidth, headerColor));
 
   // 이의신청 결과
   if (

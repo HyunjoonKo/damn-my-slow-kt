@@ -45,7 +45,7 @@ src/
 tests/
 ├── config.test.ts     # Unit tests for config defaults
 ├── db.test.ts         # SpeedDatabase timezone-aware record tests
-├── kt-parser.test.ts  # SLA result parser unit tests (parseMbpsValue, summarizeSlaResults)
+└── kt-parser.test.ts  # SLA result parser unit tests (parseMbpsValue, summarizeSlaResults)
 ```
 
 > Run `tree -I node_modules -I dist` to see the full directory structure.
