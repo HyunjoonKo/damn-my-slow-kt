@@ -805,12 +805,13 @@ export function installSchedule(
 ): void {
   const platform = getPlatform();
 
-  // schedule.times를 지정해도 run은 하루 max_attempts회까지만 측정하므로 뒤쪽 시각은 스킵된다
+  // schedule.times를 지정해도 run은 하루 max_attempts회까지만 측정하므로 뒤쪽 시각은 스킵된다.
+  // PC가 꺼져 놓치는 시각을 대비해 일부러 여유분을 두는 구성도 있으므로 경고가 아닌 안내로 표시.
   const times = buildScheduleTimes(config);
   if (config.schedule.times && times.length > config.schedule.max_attempts) {
     console.log(
-      `⚠️  schedule.times가 ${times.length}개지만 max_attempts가 ${config.schedule.max_attempts}회라 ` +
-        `하루 ${config.schedule.max_attempts}회 이후 실행은 스킵됩니다.`,
+      `ℹ️  schedule.times ${times.length}개 중 하루 max_attempts(${config.schedule.max_attempts}회)까지만 측정하고 ` +
+        '나머지는 스킵합니다 (놓친 시각 대비 여유분으로 둔 경우 그대로 두면 됩니다).',
     );
   }
 
