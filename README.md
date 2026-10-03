@@ -131,6 +131,7 @@ schedule:
   max_attempts: 10       # 하루 최대 측정 횟수
   retry_interval_minutes: 120  # 측정 간격 (분)
   # times: ["20:00", "22:00", "00:00", "06:00"]  # 측정 시각 직접 지정 (선택, 자정 넘김 가능)
+  # 횟수·감면 성공은 달력 날짜로 집계 — 자정 이후 측정은 그날 저녁 측정과 같은 날로 묶여 매일 반복됨
 
 notification:
   discord_webhook: ""    # Discord 알림 (선택)
